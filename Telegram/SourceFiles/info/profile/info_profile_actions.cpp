@@ -101,6 +101,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "styles/style_menu_icons.h"
 #include "styles/style_settings.h" // settingsButtonRightSkip.
 #include "styles/style_window.h" // mainMenuToggleFourStrokes.
+#include "ui/boxes/confirm_box.h"
 
 #include <QtGui/QGuiApplication>
 #include <QtGui/QClipboard>
@@ -1251,6 +1252,7 @@ private:
 	void addJoinChannelAction(not_null<ChannelData*> channel);
 	void fillUserActions(not_null<UserData*> user);
 	void fillChannelActions(not_null<ChannelData*> channel);
+	void addSecretChatAction(not_null<UserData*> user);
 
 	not_null<Controller*> _controller;
 	not_null<Ui::RpWidget*> _parent;
@@ -2705,6 +2707,31 @@ void ActionsFiller::addBlockAction(not_null<UserData*> user) {
 		st::infoBlockButton);
 }
 
+void ActionsFiller::addSecretChatAction(not_null<UserData*> user) {
+	
+	auto text = rpl::single(QString("Start Secret Chat"));
+
+	auto callback = [=] {
+		const auto controller = _controller->parentController();
+
+		controller->show(Ui::MakeConfirmBox({
+			.text = "Start encrypted chat with this user?",
+			.confirmed = [=](Fn<void()>&& close) {
+				close();
+			},
+			.confirmText = "START",
+			.cancelText = "Cancel"
+			}));
+		};
+
+	AddActionButton(
+		_wrap,
+		std::move(text),
+		rpl::single(true),
+		std::move(callback),
+		&st::menuIconLock
+	);
+}
 void ActionsFiller::addLeaveChannelAction(not_null<ChannelData*> channel) {
 	Expects(_controller->parentController());
 
@@ -2764,6 +2791,7 @@ void ActionsFiller::fillUserActions(not_null<UserData*> user) {
 			addReportAction();
 		}
 		addBlockAction(user);
+		addSecretChatAction(user);
 	}
 }
 
