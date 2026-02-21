@@ -2708,19 +2708,21 @@ void ActionsFiller::addBlockAction(not_null<UserData*> user) {
 }
 
 void ActionsFiller::addSecretChatAction(not_null<UserData*> user) {
-	
+	// 1. Buton Metni
 	auto text = rpl::single(QString("Start Secret Chat"));
+	const auto controller = _controller->parentController();
 
 	auto callback = [=] {
-		const auto controller = _controller->parentController();
-
 		controller->show(Ui::MakeConfirmBox({
-			.text = "Start encrypted chat with this user?",
+			.text = QString("Are you sure you want to start a secret chat?"),
 			.confirmed = [=](Fn<void()>&& close) {
-				close();
+				close(); 
+
+				controller->showToast("A private chat request has been sent");
+
 			},
-			.confirmText = "START",
-			.cancelText = "Cancel"
+			.confirmText = QString("Start"),
+			.cancelText = QString("Cancel")
 			}));
 		};
 
