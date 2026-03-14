@@ -9,6 +9,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "base/call_delayed.h"
 #include "base/event_filter.h"
+#include "base/debug_destroy_informer.h"
 #include "boxes/sticker_set_box.h"
 #include "data/data_document.h"
 #include "data/data_message_reactions.h"
@@ -62,7 +63,7 @@ bool ShowReactionPreview(
 		};
 
 	};
-	const auto state = std::make_shared<PrintDead<State>>();
+	const auto state = std::make_shared<State>();
 
 	const auto mainwidget = controller->widget();
 	state->mediaPreview = base::make_unique_q<Window::MediaPreviewWidget>(
