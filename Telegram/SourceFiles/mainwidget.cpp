@@ -2665,6 +2665,8 @@ auto MainWidget::thirdSectionForCurrentMainSection(
 		return std::make_shared<Info::Memento>(
 			sublist->owningHistory()->peer,
 			Info::Memento::DefaultSection(sublist->owningHistory()->peer));
+	} else if (key && key.entry()->asSecretChat()) {
+		return {};
 	}
 	Unexpected("Key in MainWidget::thirdSectionForCurrentMainSection().");
 }
@@ -2680,6 +2682,16 @@ void MainWidget::updateThirdColumnToCurrentChat(
 		}
 	};
 	auto &settings = Core::App().settings();
+	if (key && key.entry()->asSecretChat()) {
+		settings.setTabbedReplacedWithInfo(false);
+		saveOldThirdSection();
+		if (_thirdSection) {
+			destroyThirdSection();
+			_thirdShadow.destroy();
+			updateControlsGeometry();
+		}
+		return;
+	}
 	auto params = Window::SectionShow(
 		Window::SectionShow::Way::ClearStack,
 		anim::type::instant,

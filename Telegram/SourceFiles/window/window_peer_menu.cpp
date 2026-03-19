@@ -91,6 +91,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "info/stories/info_stories_widget.h"
 #include "data/components/scheduled_messages.h"
 #include "data/notify/data_notify_settings.h"
+#include "data/secret/secret_chat_manager.h"
 #include "data/stickers/data_custom_emoji.h"
 #include "data/data_changes.h"
 #include "data/data_session.h"
@@ -106,6 +107,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_histories.h"
 #include "data/data_chat_filters.h"
 #include "dialogs/dialogs_key.h"
+#include "dialogs/secret_chat_entry.h"
 #include "core/application.h"
 #include "core/ui_integration.h"
 #include "export/export_manager.h"
@@ -264,6 +266,7 @@ private:
 	void fillSavedSublistActions();
 	void fillContextMenuActions();
 	void fillMonoforumPeerActions();
+	void addDeleteSecretChat();
 
 	void addHidePromotion();
 	void addTogglePin();
@@ -320,6 +323,7 @@ private:
 	PeerData *_peer = nullptr;
 	Data::Folder *_folder = nullptr;
 	Data::SavedSublist *_sublist = nullptr;
+	Dialogs::SecretChatEntry *_secret = nullptr;
 	const PeerMenuCallback &_addAction;
 
 };
@@ -460,6 +464,7 @@ Filler::Filler(
 , _peer(request.key.peer())
 , _folder(request.key.folder())
 , _sublist(request.key.sublist())
+, _secret(request.key ? request.key.entry()->asSecretChat() : nullptr)
 , _addAction(addAction) {
 }
 
@@ -1543,6 +1548,10 @@ void Filler::addVideoChat() {
 }
 
 void Filler::fillContextMenuActions() {
+	if (_secret) {
+		addDeleteSecretChat();
+		return;
+	}
 	addNewWindow();
 	addHidePromotion();
 	addToggleArchive();
@@ -1563,6 +1572,35 @@ void Filler::fillContextMenuActions() {
 	addDeleteChat();
 	addLeaveChat();
 	addDeleteTopic();
+}
+
+void Filler::addDeleteSecretChat() {
+	if (!_secret) {
+		return;
+	}
+	const auto chatId = _secret->chatId();
+	const auto controller = _controller;
+	const auto title = Data::SecretChats::Manager(
+		&controller->session()).DisplayNameForChat(chatId);
+	_addAction({
+		.text = QString("Delete Secret Chat"),
+		.handler = [=] {
+			controller->show(Ui::MakeConfirmBox({
+				.text = QString("Delete \"%1\" and its locally stored secret chat history from Telegram Desktop?")
+					.arg(title),
+				.confirmed = [=](Fn<void()> &&close) {
+					close();
+					if (Data::SecretChats::Manager(&controller->session()).DeleteChat(chatId)) {
+						controller->showToast(QString("Secret chat deleted."));
+					}
+				},
+				.confirmText = tr::lng_box_delete(),
+				.confirmStyle = &st::attentionBoxButton,
+			}), Ui::LayerOption::CloseOther);
+		},
+		.icon = &st::menuIconDeleteAttention,
+		.isAttention = true,
+	});
 }
 
 void Filler::fillHistoryActions() {

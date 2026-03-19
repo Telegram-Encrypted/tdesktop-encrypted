@@ -27,5 +27,8 @@ bool SaveSecretChatMessages(
 QVector<SecretParsedMessage> LoadSecretChatMessages(
 	Main::Session *session,
 	int64_t chatId);
+bool DeleteSecretChat(
+	Main::Session *session,
+	int64_t chatId);
 
 } // namespace Data::SecretChats

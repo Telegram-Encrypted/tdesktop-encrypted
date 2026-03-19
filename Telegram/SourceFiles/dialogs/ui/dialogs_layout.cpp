@@ -54,6 +54,27 @@ namespace Dialogs::Ui {
 namespace {
 
 const auto kPsaBadgePrefix = "cloud_lng_badge_psa_";
+const auto kSecretChatNameColor = QColor(0x4E, 0xAD, 0x41);
+
+void PaintTintedIcon(
+		Painter &p,
+		const style::icon &icon,
+		QPoint position,
+		const QColor &color) {
+	const auto ratio = style::DevicePixelRatio();
+	auto image = QImage(
+		QSize(icon.width() * ratio, icon.height() * ratio),
+		QImage::Format_ARGB32_Premultiplied);
+	image.fill(Qt::transparent);
+	image.setDevicePixelRatio(ratio);
+	{
+		Painter q(&image);
+		icon.paint(q, QPoint(0, 0), icon.width());
+		q.setCompositionMode(QPainter::CompositionMode_SourceIn);
+		q.fillRect(QRect(QPoint(0, 0), QSize(icon.width(), icon.height())), color);
+	}
+	p.drawImage(position, image);
+}
 
 [[nodiscard]] bool ShowUserBotIcon(not_null<UserData*> user) {
 	return user->isBot()
@@ -488,6 +509,15 @@ void PaintRow(
 				+ chatTypeIcon->width()
 				+ st::dialogsChatTypeSkip);
 		}
+	} else if (entry->asSecretChat()) {
+		PaintTintedIcon(
+			p,
+			st::dialogsUnlockIcon,
+			rectForName.topLeft(),
+			kSecretChatNameColor);
+		rectForName.setLeft(rectForName.left()
+			+ st::dialogsUnlockIcon.width()
+			+ st::dialogsChatTypeSkip);
 	}
 	auto texttop = context.st->textTop;
 	if (const auto folder = entry->asFolder()) {
@@ -816,20 +846,35 @@ void PaintRow(
 			.elisionLines = 1,
 		});
 	} else {
-		p.setPen(context.active
-			? st::dialogsNameFgActive
-			: entry->folder()
-			? (context.selected
-				? st::dialogsArchiveFgOver
-				: st::dialogsArchiveFg)
-			: (context.selected
-				? st::dialogsNameFgOver
-				: st::dialogsNameFg));
-		rowName.draw(p, {
-			.position = rectForName.topLeft(),
-			.availableWidth = rectForName.width(),
-			.elisionLines = 1,
-		});
+		if (entry->asSecretChat()) {
+			p.setPen(kSecretChatNameColor);
+		} else {
+			p.setPen(context.active
+				? st::dialogsNameFgActive
+				: entry->folder()
+				? (context.selected
+					? st::dialogsArchiveFgOver
+					: st::dialogsArchiveFg)
+				: (context.selected
+					? st::dialogsNameFgOver
+					: st::dialogsNameFg));
+		}
+		if (entry->asSecretChat()) {
+			const auto text = st::semiboldFont->elided(
+				entry->chatListName(),
+				rectForName.width());
+			p.drawTextLeft(
+				rectForName.left(),
+				rectForName.top(),
+				context.width,
+				text);
+		} else {
+			rowName.draw(p, {
+				.position = rectForName.topLeft(),
+				.availableWidth = rectForName.width(),
+				.elisionLines = 1,
+			});
+		}
 	}
 
 	if (const auto tags = context.chatsFilterTags) {

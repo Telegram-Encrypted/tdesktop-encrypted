@@ -21,12 +21,14 @@ class Session;
 } // namespace Main
 
 class History;
+class UserData;
 
 namespace Data::SecretChats {
 
 class SecretChatManager {
 public:
 	explicit SecretChatManager(not_null<Main::Session*> session);
+	void FinishInitialization();
 
 	void HandleEncryptedMessage(
 		int64_t chatId,
@@ -52,6 +54,10 @@ public:
 	[[nodiscard]] const std::vector<FullMsgId> &ViewMessageIds(int64_t chatId);
 	[[nodiscard]] rpl::producer<int64_t> messageUpdates() const;
 	[[nodiscard]] bool SendText(int64_t chatId, const QString &text);
+	[[nodiscard]] bool DeleteChat(int64_t chatId);
+	[[nodiscard]] UserData *DisplayUserForChat(int64_t chatId) const;
+	[[nodiscard]] QString DisplayNameForChat(int64_t chatId) const;
+	[[nodiscard]] QString DisplayStatusForChat(int64_t chatId) const;
 
 
 private:

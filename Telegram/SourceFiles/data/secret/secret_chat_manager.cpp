@@ -5,7 +5,9 @@
 #include "data/secret/secret_chat_tl.h"
 #include "data/secret/secret_chat_types.h"
 #include "data/data_peer.h"
+#include "data/data_peer_values.h"
 #include "data/data_session.h"
+#include "data/data_user.h"
 #include "dialogs/dialogs_key.h"
 #include "dialogs/secret_chat_entry.h"
 #include "history/history.h"
@@ -65,6 +67,21 @@ namespace {
 	return std::visit([](const auto &value) -> const SecretParsedEnvelope& {
 		return value.envelope;
 	}, message);
+}
+
+[[nodiscard]] std::optional<UserId> RemoteUserIdForState(
+		not_null<Main::Session*> session,
+		const SecretChatState &state) {
+	const auto selfId = session->userId();
+	const auto adminId = UserId(state.admin_id);
+	const auto participantId = UserId(state.participant_id);
+	if (adminId == selfId) {
+		return participantId;
+	} else if (participantId == selfId) {
+		return adminId;
+	}
+	const auto resolved = state.is_creator ? participantId : adminId;
+	return resolved ? std::optional<UserId>(resolved) : std::nullopt;
 }
 
 [[nodiscard]] QString RenderMessageText(const SecretParsedMessage &message) {
@@ -146,6 +163,12 @@ SecretChatManager::SecretChatManager(not_null<Main::Session*> session)
 : _session(session) {
 	RefreshKnownChats();
 	RestoreMessagesFromStorage();
+	// Chat-list entry creation is deferred until after Manager() inserts this
+	// instance into the static map, otherwise entry refresh can re-enter
+	// Manager() during construction and recurse indefinitely.
+}
+
+void SecretChatManager::FinishInitialization() {
 	EnsureEntriesFromKnownChats();
 }
 
@@ -541,6 +564,7 @@ SecretChatManager &Manager(not_null<Main::Session*> session) {
 	auto manager = std::make_unique<SecretChatManager>(session);
 	auto result = manager.get();
 	managers.emplace(session.get(), std::move(manager));
+	result->FinishInitialization();
 	return *result;
 }
 
@@ -640,6 +664,28 @@ bool SecretChatManager::SendText(int64_t chatId, const QString &text) {
 	return true;
 }
 
+bool SecretChatManager::DeleteChat(int64_t chatId) {
+	const auto removed = DeleteSecretChat(_session, chatId);
+	_messages.remove(chatId);
+	_rendered.erase(chatId);
+	if (const auto i = _entries.find(chatId); i != end(_entries)) {
+		_session->data().removeChatListEntry(Dialogs::Key(
+			static_cast<Dialogs::Entry*>(i->second.get())));
+		_entries.erase(i);
+	}
+	auto filtered = QVector<SecretChatDescriptor>();
+	filtered.reserve(_knownChats.size());
+	for (const auto &descriptor : _knownChats) {
+		if (descriptor.chatId != chatId) {
+			filtered.push_back(descriptor);
+		}
+	}
+	_knownChats = std::move(filtered);
+	LOG(("1337 SecretChat: manager deleted secret chat chat_id=%1")
+		.arg(chatId));
+	return removed;
+}
+
 const QVector<SecretParsedMessage> &SecretChatManager::Messages(int64_t chatId) const {
 	static const QVector<SecretParsedMessage> kEmpty;
 	const auto i = _messages.find(chatId);
@@ -661,6 +707,39 @@ const std::vector<FullMsgId> &SecretChatManager::ViewMessageIds(int64_t chatId) 
 
 rpl::producer<int64_t> SecretChatManager::messageUpdates() const {
 	return _messageUpdates.events();
+}
+
+UserData *SecretChatManager::DisplayUserForChat(int64_t chatId) const {
+	const auto state = LoadState(chatId);
+	if (!state.has_value()) {
+		return nullptr;
+	}
+	const auto remoteUserId = RemoteUserIdForState(_session, *state);
+	return remoteUserId.has_value()
+		? _session->data().userLoaded(*remoteUserId)
+		: nullptr;
+}
+
+QString SecretChatManager::DisplayNameForChat(int64_t chatId) const {
+	if (const auto user = DisplayUserForChat(chatId)) {
+		return user->name();
+	}
+	return QString("Secret Chat %1").arg(chatId);
+}
+
+QString SecretChatManager::DisplayStatusForChat(int64_t chatId) const {
+	if (const auto user = DisplayUserForChat(chatId)) {
+		if (Data::IsUserOnline(user, base::unixtime::now())) {
+			return QString("online");
+		}
+		if (const auto username = user->username(); !username.isEmpty()) {
+			return '@' + username;
+		}
+		if (!user->phone().isEmpty()) {
+			return '+' + user->phone();
+		}
+	}
+	return QString("Secret chat");
 }
 
 } // namespace Data::SecretChats

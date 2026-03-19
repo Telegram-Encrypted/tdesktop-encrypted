@@ -3,7 +3,6 @@
 #include "dialogs/dialogs_entry.h"
 
 #include "base/flat_set.h"
-#include "ui/empty_userpic.h"
 
 namespace Dialogs {
 
@@ -34,13 +33,14 @@ public:
 		const Dialogs::Ui::PaintContext &context) const override;
 
 private:
-	void indexNameParts();
+	void indexNameParts() const;
+	void refreshPresentation() const;
 
 	const int64_t _chatId = 0;
-	QString _name;
-	base::flat_set<QString> _nameWords;
-	base::flat_set<QChar> _nameFirstLetters;
-	Ui::EmptyUserpic _userpic;
+	mutable QString _name;
+	mutable base::flat_set<QString> _nameWords;
+	mutable base::flat_set<QChar> _nameFirstLetters;
+	mutable int _nameVersion = 1;
 };
 
 } // namespace Dialogs

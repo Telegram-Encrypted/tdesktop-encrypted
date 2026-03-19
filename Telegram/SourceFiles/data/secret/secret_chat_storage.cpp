@@ -393,4 +393,15 @@ QVector<SecretParsedMessage> LoadSecretChatMessages(
 	return i.value();
 }
 
+bool DeleteSecretChat(Main::Session *session, int64_t chatId) {
+	auto store = ReadStore(session);
+	const auto removedState = store.states.remove(chatId);
+	const auto removedMessages = store.messages.remove(chatId);
+	LOG(("1337 SecretChat: deleted encrypted secret chat chat_id=%1 removed_state=%2 removed_messages=%3")
+		.arg(chatId)
+		.arg(removedState)
+		.arg(removedMessages));
+	return WriteStore(session, store);
+}
+
 } // namespace Data::SecretChats
