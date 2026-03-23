@@ -23,6 +23,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/view/history_view_translate_bar.h"
 #include "history/view/history_view_translate_tracker.h"
 #include "history/view/history_view_self_forwards_tagger.h"
+#include "data/secret/secret_chat_manager.h"
 #include "history/history.h"
 #include "history/history_drag_area.h"
 #include "history/history_item_components.h"
@@ -364,7 +365,11 @@ ChatWidget::ChatWidget(
 
 	_inner->replyToMessageRequested(
 	) | rpl::on_next([=](ListWidget::ReplyToMessageRequest request) {
-		const auto canSendReply = _topic
+		const auto secretChat = Data::SecretChats::Manager(
+			&session()).ChatIdForHistory(_history);
+		const auto canSendReply = secretChat.has_value()
+			? true
+			: _topic
 			? Data::CanSendAnything(_topic)
 			: Data::CanSendAnything(_peer);
 		const auto &to = request.to;

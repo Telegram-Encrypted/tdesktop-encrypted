@@ -18,6 +18,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "api/api_toggling_media.h" // Api::ToggleFavedSticker
 #include "base/qt/qt_key_modifiers.h"
 #include "base/unixtime.h"
+#include "data/secret/secret_chat_manager.h"
 #include "history/view/history_view_list_widget.h"
 #include "history/view/history_view_cursor_state.h"
 #include "history/history.h"
@@ -605,14 +606,20 @@ bool AddReplyToMessageAction(
 		: request.item;
 	const auto topic = item ? item->topic() : nullptr;
 	const auto peer = item ? item->history()->peer.get() : nullptr;
+	const auto secretChat = item
+		? Data::SecretChats::Manager(
+			&item->history()->session()).ChatIdForHistory(item->history())
+		: std::optional<int64_t>();
 	if (!item
-		|| !item->isRegular()
+		|| (!item->isRegular() && !secretChat)
 		|| (context != Context::History
 			&& context != Context::Replies
 			&& context != Context::Monoforum)) {
 		return false;
 	}
-	const auto canSendReply = topic
+	const auto canSendReply = secretChat.has_value()
+		? true
+		: topic
 		? Data::CanSendAnything(topic)
 		: Data::CanSendAnything(peer);
 	const auto canReply = canSendReply || item->allowsForward();

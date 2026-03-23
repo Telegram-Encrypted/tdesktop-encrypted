@@ -58,25 +58,60 @@ std::optional<QVector<SecretParsedEntity>> ParseSecretMessageEntities(
 		}
 
 		QString entityText;
+		auto entityData = QString();
 		if ((*entityOffset >= 0)
 			&& (*entityLength >= 0)
 			&& (*entityOffset + *entityLength <= messageText.size())) {
 			entityText = messageText.mid(*entityOffset, *entityLength);
 		}
 
-		LOG(("1335 SecretChat: %1 entity chat_id=%2 index=%3 type=%4 offset=%5 length=%6 text=%7")
+		switch (*entityCtor) {
+		case 0x73924be0:
+		case 0x76a6d327: {
+			const auto value = reader.ReadTLString();
+			if (!value.has_value()) {
+				LOG(("1335 SecretChat: %1 entity extra string truncated chat_id=%2 index=%3 type=%4 offset=%5 limit=%6")
+					.arg(QString::fromLatin1(tag))
+					.arg(chatId)
+					.arg(i)
+					.arg(SecretMessageEntityName(*entityCtor))
+					.arg(reader.offset)
+					.arg(reader.limit));
+				return std::nullopt;
+			}
+			entityData = *value;
+		} break;
+		case 0xc8cf05f8: {
+			const auto value = reader.ReadUInt64();
+			if (!value.has_value()) {
+				LOG(("1335 SecretChat: %1 entity extra long truncated chat_id=%2 index=%3 type=%4 offset=%5 limit=%6")
+					.arg(QString::fromLatin1(tag))
+					.arg(chatId)
+					.arg(i)
+					.arg(SecretMessageEntityName(*entityCtor))
+					.arg(reader.offset)
+					.arg(reader.limit));
+				return std::nullopt;
+			}
+			entityData = QString::number(*value);
+		} break;
+		}
+
+		LOG(("1335 SecretChat: %1 entity chat_id=%2 index=%3 type=%4 offset=%5 length=%6 text=%7 data=%8")
 			.arg(QString::fromLatin1(tag))
 			.arg(chatId)
 			.arg(i)
 			.arg(SecretMessageEntityName(*entityCtor))
 			.arg(*entityOffset)
 			.arg(*entityLength)
-			.arg(entityText));
+			.arg(entityText)
+			.arg(entityData));
 
 		result.push_back(SecretParsedEntity{
 			.constructor = *entityCtor,
 			.offset = *entityOffset,
 			.length = *entityLength,
+			.data = std::move(entityData),
 		});
 	}
 
@@ -238,6 +273,7 @@ std::optional<SecretParsedMessage> ParseDecryptedSecretChatPayload(
 		}
 
 		QVector<SecretParsedEntity> entities;
+		auto replyToRandomIdValue = uint64_t(0);
 		if (*flags & (1 << 7)) {
 			const auto parsedEntities = ParseSecretMessageEntities(
 				chatId,
@@ -280,6 +316,7 @@ std::optional<SecretParsedMessage> ParseDecryptedSecretChatPayload(
 				.arg(QString::fromLatin1(tag))
 				.arg(chatId)
 				.arg(FormatUint64(*replyToRandomId)));
+			replyToRandomIdValue = *replyToRandomId;
 		}
 
 		if (*flags & (1 << 17)) {
@@ -302,6 +339,7 @@ std::optional<SecretParsedMessage> ParseDecryptedSecretChatPayload(
 			.chatId = chatId,
 			.envelope = envelope,
 			.randomId = *randomId,
+			.replyToRandomId = replyToRandomIdValue,
 			.flags = *flags,
 			.ttl = *ttl,
 			.text = *messageText,

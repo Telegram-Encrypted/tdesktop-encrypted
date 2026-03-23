@@ -14,7 +14,7 @@ namespace {
 
 constexpr auto kSecretStorageBlobKey = "secret-chat-storage-v1";
 constexpr auto kSecretStorageMagic = quint32(0x53434331);
-constexpr auto kSecretStorageVersion = quint32(1);
+constexpr auto kSecretStorageVersion = quint32(2);
 
 enum class MessageKind : quint32 {
 	Text = 1,
@@ -68,11 +68,19 @@ void SerializeMessage(QDataStream &stream, const SecretParsedMessage &message) {
 	if (const auto text = std::get_if<SecretParsedTextMessage>(&message)) {
 		stream << quint32(MessageKind::Text) << qint64(text->chatId);
 		SerializeEnvelope(stream, text->envelope);
-		stream << quint64(text->randomId) << quint32(text->flags) << qint32(text->ttl);
+		stream
+			<< quint64(text->randomId)
+			<< quint64(text->replyToRandomId)
+			<< quint32(text->flags)
+			<< qint32(text->ttl);
 		stream << text->text;
 		stream << quint32(text->entities.size());
 		for (const auto &entity : text->entities) {
-			stream << quint32(entity.constructor) << qint32(entity.offset) << qint32(entity.length);
+			stream
+				<< quint32(entity.constructor)
+				<< qint32(entity.offset)
+				<< qint32(entity.length)
+				<< entity.data;
 		}
 		return;
 	}
@@ -91,7 +99,9 @@ void SerializeMessage(QDataStream &stream, const SecretParsedMessage &message) {
 	stream << quint32(unsupported->constructor) << unsupported->description;
 }
 
-std::optional<SecretParsedMessage> DeserializeMessage(QDataStream &stream) {
+std::optional<SecretParsedMessage> DeserializeMessage(
+		QDataStream &stream,
+		quint32 version) {
 	auto kind = quint32();
 	auto chatId = qint64();
 	stream >> kind >> chatId;
@@ -107,11 +117,16 @@ std::optional<SecretParsedMessage> DeserializeMessage(QDataStream &stream) {
 	switch (MessageKind(kind)) {
 	case MessageKind::Text: {
 		auto randomId = quint64();
+		auto replyToRandomId = quint64();
 		auto flags = quint32();
 		auto ttl = qint32();
 		auto text = QString();
 		auto count = quint32();
-		stream >> randomId >> flags >> ttl >> text >> count;
+		stream >> randomId;
+		if (version >= 2) {
+			stream >> replyToRandomId;
+		}
+		stream >> flags >> ttl >> text >> count;
 		if (stream.status() != QDataStream::Ok) {
 			return std::nullopt;
 		}
@@ -121,7 +136,11 @@ std::optional<SecretParsedMessage> DeserializeMessage(QDataStream &stream) {
 			auto constructor = quint32();
 			auto offset = qint32();
 			auto length = qint32();
+			auto data = QString();
 			stream >> constructor >> offset >> length;
+			if (version >= 2) {
+				stream >> data;
+			}
 			if (stream.status() != QDataStream::Ok) {
 				return std::nullopt;
 			}
@@ -129,12 +148,14 @@ std::optional<SecretParsedMessage> DeserializeMessage(QDataStream &stream) {
 				.constructor = uint32_t(constructor),
 				.offset = int32_t(offset),
 				.length = int32_t(length),
+				.data = std::move(data),
 			});
 		}
 		return SecretParsedTextMessage{
 			.chatId = chatId,
 			.envelope = envelope,
 			.randomId = randomId,
+			.replyToRandomId = replyToRandomId,
 			.flags = flags,
 			.ttl = ttl,
 			.text = std::move(text),
@@ -223,7 +244,7 @@ std::optional<SecretStore> DeserializeStore(const QByteArray &bytes) {
 	stream >> magic >> version;
 	if (stream.status() != QDataStream::Ok
 		|| magic != kSecretStorageMagic
-		|| version != kSecretStorageVersion) {
+		|| (version != 1 && version != kSecretStorageVersion)) {
 		return std::nullopt;
 	}
 
@@ -285,7 +306,7 @@ std::optional<SecretStore> DeserializeStore(const QByteArray &bytes) {
 		auto messages = QVector<SecretParsedMessage>();
 		messages.reserve(int(count));
 		for (auto j = quint32(); j != count; ++j) {
-			const auto message = DeserializeMessage(stream);
+			const auto message = DeserializeMessage(stream, version);
 			if (!message.has_value()) {
 				return std::nullopt;
 			}

@@ -390,6 +390,7 @@ private:
 	void fieldChanged();
 	void fieldFocused();
 	void fieldResized();
+	[[nodiscard]] std::optional<int64_t> shownSecretChatId() const;
 
 	void initFieldAutocomplete();
 	void cancelInlineBot();
@@ -423,6 +424,7 @@ private:
 
 	[[nodiscard]] Api::SendAction prepareSendAction(
 		Api::SendOptions options) const;
+	bool sendSecretText(Api::SendOptions options);
 	void sendVoice(const VoiceToSend &data);
 	void send(Api::SendOptions options);
 	void sendWithModifiers(Qt::KeyboardModifiers modifiers);
@@ -464,6 +466,7 @@ private:
 	void updateOverStates(QPoint pos);
 	void chooseAttach(std::optional<bool> overrideSendImagesAsPhotos = {});
 	void sendButtonClicked();
+	void markSecretMessageRead(not_null<HistoryItem*> item);
 	void newItemAdded(not_null<HistoryItem*> item);
 	void maybeMarkReactionsRead(not_null<HistoryItem*> item);
 
@@ -645,6 +648,7 @@ private:
 	void setHistory(History *history);
 	void setEditMsgId(MsgId msgId);
 
+	[[nodiscard]] bool isResolvableShowAtMessage(MsgId msgId) const;
 	HistoryItem *getItemFromHistoryOrMigrated(MsgId genericMsgId) const;
 	void animatedScrollToItem(MsgId msgId);
 	void animatedScrollToY(int scrollTo, HistoryItem *attachTo = nullptr);

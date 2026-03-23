@@ -5,6 +5,7 @@
 #include "data/secret/secret_chat_tl.h"
 #include "data/secret/secret_chat_types.h"
 #include "data/data_peer.h"
+#include "data/data_changes.h"
 #include "data/data_peer_values.h"
 #include "data/data_session.h"
 #include "data/data_user.h"
@@ -12,9 +13,11 @@
 #include "dialogs/secret_chat_entry.h"
 #include "history/history.h"
 #include "history/history_item.h"
+#include "ui/text/text_entity.h"
 
 #include "base/unixtime.h"
 #include "base/random.h"
+#include "base/timer.h"
 #include "logs.h"
 #include "main/main_session.h"
 #include "mtproto/mtproto_dh_utils.h"
@@ -22,14 +25,24 @@
 
 #include "base/openssl_help.h"
 
+#include <lang_auto.h>
+
 #include <map>
 
 namespace Data::SecretChats {
+
+namespace {
+
+constexpr auto kSecretTypingTimeout = 6 * crl::time(1000);
+
+} // namespace
 
 struct SecretChatManager::RenderState {
 	PeerId peerId = 0;
 	not_null<History*> history;
 	std::vector<FullMsgId> ids;
+	std::map<uint64_t, FullMsgId> randomIds;
+	std::map<FullMsgId, uint64_t> reverseRandomIds;
 };
 
 namespace {
@@ -84,30 +97,205 @@ namespace {
 	return resolved ? std::optional<UserId>(resolved) : std::nullopt;
 }
 
-[[nodiscard]] QString RenderMessageText(const SecretParsedMessage &message) {
-	QString line;
+[[nodiscard]] SecretChatDescriptor DescriptorFromState(
+		const SecretChatState &state) {
+	return SecretChatDescriptor{
+		.chatId = state.chat_id,
+		.accessHash = state.access_hash,
+		.adminId = state.admin_id,
+		.participantId = state.participant_id,
+		.isCreator = state.is_creator,
+	};
+}
+
+[[nodiscard]] TextWithEntities RenderMessageText(
+		const SecretParsedMessage &message) {
+	auto result = TextWithEntities();
 	std::visit([&](const auto &value) {
 		using T = std::decay_t<decltype(value)>;
 		if constexpr (std::is_same_v<T, SecretParsedTextMessage>) {
-			line = value.text;
+			result.text = value.text;
+			result.entities.reserve(value.entities.size());
+			for (const auto &entity : value.entities) {
+				if ((entity.offset < 0)
+					|| (entity.length <= 0)
+					|| (entity.offset + entity.length > result.text.size())) {
+					continue;
+				}
+				auto mapped = std::optional<EntityInText>();
+				switch (entity.constructor) {
+				case 0xfa04579d:
+					mapped = EntityInText(EntityType::Mention, entity.offset, entity.length);
+				break;
+				case 0x6f635b0d:
+					mapped = EntityInText(EntityType::Hashtag, entity.offset, entity.length);
+				break;
+				case 0x6cef8ac7:
+					mapped = EntityInText(EntityType::BotCommand, entity.offset, entity.length);
+				break;
+				case 0x6ed02538:
+					mapped = EntityInText(EntityType::Url, entity.offset, entity.length);
+				break;
+				case 0x64e475c2:
+					mapped = EntityInText(EntityType::Email, entity.offset, entity.length);
+				break;
+				case 0xbd610bc9:
+					mapped = EntityInText(EntityType::Bold, entity.offset, entity.length);
+				break;
+				case 0x826f8b60:
+					mapped = EntityInText(EntityType::Italic, entity.offset, entity.length);
+				break;
+				case 0x28a20571:
+					mapped = EntityInText(EntityType::Code, entity.offset, entity.length);
+				break;
+				case 0x73924be0:
+					mapped = EntityInText(EntityType::Pre, entity.offset, entity.length, entity.data);
+				break;
+				case 0x76a6d327:
+					mapped = EntityInText(EntityType::CustomUrl, entity.offset, entity.length, entity.data);
+				break;
+				case 0x9c4e7e8b:
+					mapped = EntityInText(EntityType::Underline, entity.offset, entity.length);
+				break;
+				case 0xbf0693d4:
+					mapped = EntityInText(EntityType::StrikeOut, entity.offset, entity.length);
+				break;
+				case 0x020df5d0:
+					mapped = EntityInText(EntityType::Blockquote, entity.offset, entity.length);
+				break;
+				case 0x32ca960f:
+					mapped = EntityInText(EntityType::Spoiler, entity.offset, entity.length);
+				break;
+				}
+				if (mapped.has_value()) {
+					result.entities.push_back(*mapped);
+				}
+			}
 		} else if constexpr (std::is_same_v<T, SecretParsedServiceMessage>) {
-			line = QString("[service 0x%1]").arg(
-				value.actionConstructor,
-				8,
-				16,
-				QLatin1Char('0'));
+			result.text = QString("[secret chat: %1]").arg(
+				SecretServiceActionName(value.actionConstructor));
 		} else if constexpr (std::is_same_v<T, SecretParsedUnsupportedMessage>) {
-			line = QString("[unsupported %1]").arg(value.description);
+			result.text = QString("[unsupported %1]").arg(value.description);
 		}
 	}, message);
-	return line;
+	return result;
 }
 
-// Serialize a minimal decrypted secret text message body.
+[[nodiscard]] uint64_t MessageRandomId(const SecretParsedMessage &message) {
+	return std::visit([](const auto &value) -> uint64_t {
+		using T = std::decay_t<decltype(value)>;
+		if constexpr (std::is_same_v<T, SecretParsedUnsupportedMessage>) {
+			return 0;
+		} else {
+			return value.randomId;
+		}
+	}, message);
+}
+
+[[nodiscard]] std::optional<SecretParsedEntity> SecretEntityFromTextEntity(
+		const EntityInText &entity) {
+	auto result = SecretParsedEntity{
+		.offset = entity.offset(),
+		.length = entity.length(),
+		.data = entity.data(),
+	};
+	switch (entity.type()) {
+	case EntityType::Mention:
+		result.constructor = 0xfa04579d;
+	break;
+	case EntityType::Hashtag:
+		result.constructor = 0x6f635b0d;
+	break;
+	case EntityType::BotCommand:
+		result.constructor = 0x6cef8ac7;
+	break;
+	case EntityType::Url:
+		result.constructor = 0x6ed02538;
+	break;
+	case EntityType::Email:
+		result.constructor = 0x64e475c2;
+	break;
+	case EntityType::Bold:
+		result.constructor = 0xbd610bc9;
+	break;
+	case EntityType::Italic:
+		result.constructor = 0x826f8b60;
+	break;
+	case EntityType::Code:
+		result.constructor = 0x28a20571;
+	break;
+	case EntityType::Pre:
+		result.constructor = 0x73924be0;
+	break;
+	case EntityType::CustomUrl:
+		result.constructor = 0x76a6d327;
+	break;
+	case EntityType::Underline:
+		result.constructor = 0x9c4e7e8b;
+	break;
+	case EntityType::StrikeOut:
+		result.constructor = 0xbf0693d4;
+	break;
+	case EntityType::Blockquote:
+		result.constructor = 0x020df5d0;
+	break;
+	case EntityType::Spoiler:
+		result.constructor = 0x32ca960f;
+	break;
+	default:
+		return std::nullopt;
+	}
+	if ((result.offset < 0) || (result.length <= 0)) {
+		return std::nullopt;
+	}
+	return result;
+}
+
+[[nodiscard]] QVector<SecretParsedEntity> SecretEntitiesFromText(
+		const TextWithEntities &textWithEntities) {
+	auto result = QVector<SecretParsedEntity>();
+	result.reserve(textWithEntities.entities.size());
+	for (const auto &entity : textWithEntities.entities) {
+		const auto mapped = SecretEntityFromTextEntity(entity);
+		if (!mapped.has_value()) {
+			continue;
+		}
+		if (mapped->offset + mapped->length > textWithEntities.text.size()) {
+			continue;
+		}
+		result.push_back(*mapped);
+	}
+	return result;
+}
+
+void AppendSecretMessageEntities(
+		QByteArray &body,
+		const QVector<SecretParsedEntity> &entities) {
+	AppendUInt32(body, kTlVectorConstructor);
+	AppendInt32(body, entities.size());
+	for (const auto &entity : entities) {
+		AppendUInt32(body, entity.constructor);
+		AppendInt32(body, entity.offset);
+		AppendInt32(body, entity.length);
+		switch (entity.constructor) {
+		case 0x73924be0:
+		case 0x76a6d327:
+			AppendTLString(body, entity.data);
+		break;
+		case 0xc8cf05f8:
+			AppendUInt64(body, entity.data.toULongLong());
+		break;
+		}
+	}
+}
+
 [[nodiscard]] QByteArray SerializeSecretTextBody(
 		const SecretChatState &state,
 		uint64_t randomId,
-		const QString &text) {
+		const TextWithEntities &textWithEntities,
+		uint32_t flags,
+		const QVector<SecretParsedEntity> &entities,
+		uint64_t replyToRandomId) {
 	auto body = QByteArray();
 	AppendUInt32(body, kSecretOuterLayerConstructor);
 
@@ -120,18 +308,26 @@ namespace {
 	AppendInt32(body, SecretInSeqNo(state, state.incoming_sequence));
 	AppendInt32(body, SecretOutSeqNo(state, state.outgoing_sequence));
 	AppendUInt32(body, kSecretInnerMessageV73);
-	AppendUInt32(body, 0);
+	AppendUInt32(body, flags);
 	AppendUInt64(body, randomId);
 	AppendInt32(body, 0);
-	AppendTLString(body, text);
+	AppendTLString(body, textWithEntities.text);
+	if (!entities.isEmpty()) {
+		AppendSecretMessageEntities(body, entities);
+	}
+	if (replyToRandomId) {
+		AppendUInt64(body, replyToRandomId);
+	}
 	return body;
 }
 
 [[nodiscard]] PeerId EnsureFakeSecretPeer(
 		not_null<Data::Session*> owner,
-		int64_t chatId) {
-	const auto name = QString("Secret Chat %1").arg(chatId);
-	const auto peerId = Data::FakePeerIdForJustName(name);
+		int64_t chatId,
+		const QString &displayName) {
+	const auto seedName = QString("Secret Chat %1").arg(chatId);
+	const auto peerId = Data::FakePeerIdForJustName(seedName);
+	const auto name = displayName.isEmpty() ? seedName : displayName;
 	owner->processUser(MTP_user(
 		MTP_flags(MTPDuser::Flag::f_first_name | MTPDuser::Flag::f_min),
 		peerToBareMTPInt(peerId),
@@ -163,6 +359,26 @@ SecretChatManager::SecretChatManager(not_null<Main::Session*> session)
 : _session(session) {
 	RefreshKnownChats();
 	RestoreMessagesFromStorage();
+	_session->changes().peerUpdates(
+		Data::PeerUpdate::Flag::Name
+		| Data::PeerUpdate::Flag::Username
+		| Data::PeerUpdate::Flag::Usernames
+		| Data::PeerUpdate::Flag::PhoneNumber
+		| Data::PeerUpdate::Flag::Photo
+		| Data::PeerUpdate::Flag::OnlineStatus
+	) | rpl::on_next([=](const Data::PeerUpdate &update) {
+		const auto user = update.peer->asUser();
+		if (!user) {
+			return;
+		}
+		for (const auto &[chatId, state] : _states) {
+			const auto remoteUserId = RemoteUserIdForState(_session, state);
+			if (!remoteUserId || (*remoteUserId != user->id)) {
+				continue;
+			}
+			RefreshPresentation(chatId);
+		}
+	}, _lifetime);
 	// Chat-list entry creation is deferred until after Manager() inserts this
 	// instance into the static map, otherwise entry refresh can re-enter
 	// Manager() during construction and recurse indefinitely.
@@ -174,6 +390,12 @@ void SecretChatManager::FinishInitialization() {
 
 void SecretChatManager::RefreshKnownChats() {
 	_knownChats = LoadAllSecretChats(_session);
+	_states.clear();
+	for (const auto &descriptor : _knownChats) {
+		if (const auto state = LoadSecretChatState(_session, descriptor.chatId)) {
+			_states.emplace(descriptor.chatId, *state);
+		}
+	}
 }
 
 void SecretChatManager::RestoreMessagesFromStorage() {
@@ -203,15 +425,32 @@ void SecretChatManager::EnsureEntryForChat(
 	_entries.emplace(descriptor.chatId, std::move(entry));
 }
 
+void SecretChatManager::UpsertKnownChat(const SecretChatState &state) {
+	const auto descriptor = DescriptorFromState(state);
+	const auto i = ranges::find(
+		_knownChats,
+		state.chat_id,
+		&SecretChatDescriptor::chatId);
+	if (i == _knownChats.end()) {
+		_knownChats.push_back(descriptor);
+	} else {
+		*i = descriptor;
+	}
+}
+
 auto SecretChatManager::EnsureRenderState(int64_t chatId) -> RenderState& {
 	if (const auto i = _rendered.find(chatId); i != end(_rendered)) {
 		return *i->second;
 	}
-	const auto peerId = EnsureFakeSecretPeer(&_session->data(), chatId);
+	const auto peerId = EnsureFakeSecretPeer(
+		&_session->data(),
+		chatId,
+		DisplayNameForChat(chatId));
 	auto state = std::make_unique<RenderState>(RenderState{
 		.peerId = peerId,
 		.history = _session->data().history(peerId),
 	});
+	state->history->getReadyFor(ShowAtTheEndMsgId);
 	if (const auto i = _messages.find(chatId); i != _messages.end()) {
 		for (const auto &message : i.value()) {
 			AppendRenderedMessage(*state, message);
@@ -226,21 +465,45 @@ void SecretChatManager::AppendRenderedMessage(
 		RenderState &state,
 		const SecretParsedMessage &message) {
 	const auto &envelope = MessageEnvelope(message);
+	const auto chatId = std::visit([](const auto &value) {
+		return value.chatId;
+	}, message);
+	const auto remotePeerId = [&] {
+		const auto loaded = DisplayUserForChat(chatId);
+		return loaded ? loaded->id : state.peerId;
+	}();
 	auto fields = HistoryItemCommonFields{
 		.id = state.history->nextNonHistoryEntryId(),
-		.flags = (MessageFlag::FakeHistoryItem
-			| MessageFlag::HasFromId
+		.flags = (MessageFlag::HasFromId
 			| (envelope.outgoing ? MessageFlag::Outgoing : MessageFlag())),
 		.from = envelope.outgoing
 			? _session->userPeerId()
-			: state.peerId,
+			: remotePeerId,
 		.date = envelope.date ? envelope.date : base::unixtime::now(),
 	};
+	if (const auto text = std::get_if<SecretParsedTextMessage>(&message);
+		text && text->replyToRandomId) {
+		const auto i = state.randomIds.find(text->replyToRandomId);
+		if (i != end(state.randomIds)) {
+			fields.flags |= MessageFlag::HasReplyInfo;
+			fields.replyTo = FullReplyTo{ i->second };
+		}
+	}
 	const auto item = state.history->addNewLocalMessage(
 		std::move(fields),
-		TextWithEntities{ .text = RenderMessageText(message) },
+		RenderMessageText(message),
 		MTP_messageMediaEmpty());
 	state.ids.push_back(item->fullId());
+	if (const auto randomId = MessageRandomId(message)) {
+		state.randomIds.emplace(randomId, item->fullId());
+		state.reverseRandomIds.emplace(item->fullId(), randomId);
+	}
+	_session->changes().messageUpdated(
+		item,
+		Data::MessageUpdate::Flag::NewAdded);
+	_session->changes().historyUpdated(
+		state.history,
+		Data::HistoryUpdate::Flag::ClientSideMessages);
 }
 
 // Update the persisted incoming sequence counters from an inbound message.
@@ -271,6 +534,20 @@ void SecretChatManager::RefreshChatListEntry(
 		not_null<Dialogs::SecretChatEntry*> entry) {
 	_session->data().refreshChatListEntry(
 		Dialogs::Key(static_cast<Dialogs::Entry*>(entry.get())));
+}
+
+void SecretChatManager::RefreshPresentation(int64_t chatId) {
+	if (const auto i = _entries.find(chatId); i != end(_entries)) {
+		RefreshChatListEntry(i->second.get());
+		i->second->updateChatListEntry();
+	}
+	_presentationUpdates.fire_copy(chatId);
+}
+
+void SecretChatManager::ClearTyping(int64_t chatId) {
+	if (_typingUntil.erase(chatId) > 0) {
+		RefreshPresentation(chatId);
+	}
 }
 
 void SecretChatManager::HandleEncryptedMessage(
@@ -536,13 +813,9 @@ bool SecretChatManager::SaveState(const SecretChatState &state) const {
 	const auto saved = SaveSecretChatState(_session, state);
 	if (saved) {
 		auto that = const_cast<SecretChatManager*>(this);
-		that->RefreshKnownChats();
-		for (const auto &descriptor : that->_knownChats) {
-			if (descriptor.chatId == state.chat_id) {
-				that->EnsureEntryForChat(descriptor);
-				break;
-			}
-		}
+		that->_states[state.chat_id] = state;
+		that->UpsertKnownChat(state);
+		that->EnsureEntryForChat(DescriptorFromState(state));
 	}
 	return saved;
 }
@@ -552,7 +825,10 @@ const QVector<SecretChatDescriptor> &SecretChatManager::KnownChats() const {
 }
 
 std::optional<SecretChatState> SecretChatManager::LoadState(int64_t chatId) const {
-	return LoadSecretChatState(_session, chatId);
+	if (const auto i = _states.find(chatId); i != _states.end()) {
+		return i->second;
+	}
+	return std::nullopt;
 }
 
 SecretChatManager &Manager(not_null<Main::Session*> session) {
@@ -571,15 +847,12 @@ SecretChatManager &Manager(not_null<Main::Session*> session) {
 void SecretChatManager::StoreParsedMessage(
 		int64_t chatId,
 		SecretParsedMessage message) {
+	if (!MessageEnvelope(message).outgoing) {
+		ClearTyping(chatId);
+	}
 	AdvanceIncomingState(message);
 	if (const auto state = LoadState(chatId); state.has_value()) {
-		EnsureEntryForChat(SecretChatDescriptor{
-			.chatId = state->chat_id,
-			.accessHash = state->access_hash,
-			.adminId = state->admin_id,
-			.participantId = state->participant_id,
-			.isCreator = state->is_creator,
-		});
+		EnsureEntryForChat(DescriptorFromState(*state));
 	}
 	auto &list = _messages[chatId];
 	list.push_back(std::move(message));
@@ -598,9 +871,11 @@ void SecretChatManager::StoreParsedMessage(
 	_messageUpdates.fire_copy(chatId);
 }
 
-// Encrypt and send a plain-text secret message through messages.sendEncrypted.
-bool SecretChatManager::SendText(int64_t chatId, const QString &text) {
-	if (text.trimmed().isEmpty()) {
+bool SecretChatManager::SendText(
+		int64_t chatId,
+		const ::TextWithEntities &textWithEntities,
+		const FullReplyTo &replyTo) {
+	if (textWithEntities.text.trimmed().isEmpty()) {
 		return false;
 	}
 	auto state = LoadState(chatId);
@@ -611,7 +886,26 @@ bool SecretChatManager::SendText(int64_t chatId, const QString &text) {
 	}
 
 	const auto randomId = base::RandomValue<uint64>();
-	const auto body = SerializeSecretTextBody(*state, randomId, text);
+	const auto entities = SecretEntitiesFromText(textWithEntities);
+	auto replyToRandomId = uint64_t(0);
+	if (replyTo.messageId) {
+		const auto &render = EnsureRenderState(chatId);
+		if (const auto i = render.reverseRandomIds.find(replyTo.messageId)
+			; i != end(render.reverseRandomIds)) {
+			replyToRandomId = i->second;
+		}
+	}
+	auto flags = uint32_t(entities.isEmpty() ? 0 : (1 << 7));
+	if (replyToRandomId) {
+		flags |= (1 << 3);
+	}
+	const auto body = SerializeSecretTextBody(
+		*state,
+		randomId,
+		textWithEntities,
+		flags,
+		entities,
+		replyToRandomId);
 	const auto payload = EncryptSecretChatPayloadMtproto2(*state, body);
 	if (!payload.has_value()) {
 		LOG(("1338 SecretChat: send encryption failed chat_id=%1 random_id=%2")
@@ -626,7 +920,7 @@ bool SecretChatManager::SendText(int64_t chatId, const QString &text) {
 	LOG(("1338 SecretChat: sending encrypted text chat_id=%1 random_id=%2 text=%3 out_seq=%4")
 		.arg(chatId)
 		.arg(FormatUint64(randomId))
-		.arg(text)
+		.arg(textWithEntities.text)
 		.arg(state->outgoing_sequence));
 
 	_session->api().request(MTPmessages_SendEncrypted(
@@ -646,7 +940,10 @@ bool SecretChatManager::SendText(int64_t chatId, const QString &text) {
 				.outgoing = true,
 			},
 			.randomId = randomId,
-			.text = text,
+			.replyToRandomId = replyToRandomId,
+			.flags = flags,
+			.text = textWithEntities.text,
+			.entities = entities,
 		};
 		result.match([&](const MTPDmessages_sentEncryptedMessage &data) {
 			message.envelope.date = data.vdate().v;
@@ -666,6 +963,7 @@ bool SecretChatManager::SendText(int64_t chatId, const QString &text) {
 
 bool SecretChatManager::DeleteChat(int64_t chatId) {
 	const auto removed = DeleteSecretChat(_session, chatId);
+	_states.erase(chatId);
 	_messages.remove(chatId);
 	_rendered.erase(chatId);
 	if (const auto i = _entries.find(chatId); i != end(_entries)) {
@@ -705,8 +1003,31 @@ const std::vector<FullMsgId> &SecretChatManager::ViewMessageIds(int64_t chatId) 
 	return EnsureRenderState(chatId).ids;
 }
 
+std::optional<int64_t> SecretChatManager::ChatIdForHistory(
+		not_null<const History*> history) const {
+	for (const auto &[chatId, render] : _rendered) {
+		if (render->history == history) {
+			return chatId;
+		}
+	}
+	return std::nullopt;
+}
+
+std::optional<int64_t> SecretChatManager::ChatIdForPeer(PeerId peerId) const {
+	for (const auto &[chatId, render] : _rendered) {
+		if (render->peerId == peerId) {
+			return chatId;
+		}
+	}
+	return std::nullopt;
+}
+
 rpl::producer<int64_t> SecretChatManager::messageUpdates() const {
 	return _messageUpdates.events();
+}
+
+rpl::producer<int64_t> SecretChatManager::presentationUpdates() const {
+	return _presentationUpdates.events();
 }
 
 UserData *SecretChatManager::DisplayUserForChat(int64_t chatId) const {
@@ -728,18 +1049,100 @@ QString SecretChatManager::DisplayNameForChat(int64_t chatId) const {
 }
 
 QString SecretChatManager::DisplayStatusForChat(int64_t chatId) const {
+	if (const auto i = _typingUntil.find(chatId); (i != end(_typingUntil)) && (i->second > crl::now())) {
+		return tr::lng_typing(tr::now);
+	}
 	if (const auto user = DisplayUserForChat(chatId)) {
-		if (Data::IsUserOnline(user, base::unixtime::now())) {
-			return QString("online");
+		const auto now = base::unixtime::now();
+		if (Data::IsUserOnline(user, now)) {
+			_session->data().watchForOffline(user, now);
 		}
-		if (const auto username = user->username(); !username.isEmpty()) {
-			return '@' + username;
-		}
-		if (!user->phone().isEmpty()) {
-			return '+' + user->phone();
-		}
+		return Data::OnlineText(user, now);
 	}
 	return QString("Secret chat");
+}
+void SecretChatManager::HandleEncryptedTyping(int64_t chatId) {
+	auto &timer = _typingTimers[chatId];
+	if (!timer) {
+		timer = std::make_unique<base::Timer>();
+		timer->setCallback([=, this] {
+			const auto i = _typingUntil.find(chatId);
+			if ((i == end(_typingUntil)) || (i->second <= crl::now())) {
+				ClearTyping(chatId);
+				return;
+			}
+			if (const auto j = _typingTimers.find(chatId); j != end(_typingTimers)) {
+				j->second->callOnce(std::max(i->second - crl::now(), crl::time(1)));
+			}
+		});
+	}
+	_typingUntil[chatId] = crl::now() + kSecretTypingTimeout;
+	timer->callOnce(kSecretTypingTimeout);
+	LOG(("1336 SecretChat: typing active chat_id=%1 timeout_ms=%2")
+		.arg(chatId)
+		.arg(kSecretTypingTimeout));
+	RefreshPresentation(chatId);
+}
+
+void SecretChatManager::HandleEncryptedMessagesRead(int64_t chatId, TimeId maxDate) {
+	if (!maxDate) {
+		return;
+	}
+	auto &render = EnsureRenderState(chatId);
+	const auto &messages = Messages(chatId);
+	const auto limit = std::min(size_t(messages.size()), render.ids.size());
+	auto upTo = MsgId();
+	for (auto i = size_t(0); i != limit; ++i) {
+		const auto &message = messages[int(i)];
+		const auto &envelope = MessageEnvelope(message);
+		if (!envelope.outgoing || !envelope.date || (envelope.date > maxDate)) {
+			continue;
+		}
+		upTo = render.ids[i].msg;
+	}
+	if (!upTo) {
+		LOG(("1338 SecretChat: read update had no matching outgoing message chat_id=%1 max_date=%2")
+			.arg(chatId)
+			.arg(maxDate));
+		return;
+	}
+	render.history->outboxRead(upTo);
+	LOG(("1338 SecretChat: marked outgoing read chat_id=%1 max_date=%2 msg_id=%3")
+		.arg(chatId)
+		.arg(maxDate)
+		.arg(upTo.bare));
+}
+
+void SecretChatManager::MarkReadTill(int64_t chatId, TimeId maxDate) {
+	if (!maxDate) {
+		return;
+	}
+	if (const auto i = _readTillSent.find(chatId); (i != end(_readTillSent)) && (i->second >= maxDate)) {
+		return;
+	}
+	const auto state = LoadState(chatId);
+	if (!state.has_value()) {
+		return;
+	}
+	_readTillSent[chatId] = maxDate;
+	LOG(("1338 SecretChat: sending readEncryptedHistory chat_id=%1 max_date=%2")
+		.arg(chatId)
+		.arg(maxDate));
+	_session->api().request(MTPmessages_ReadEncryptedHistory(
+		MTP_inputEncryptedChat(
+			MTP_int(chatId),
+			MTP_long(state->access_hash)),
+		MTP_int(maxDate)
+	)).done([=](const MTPBool &) {
+		LOG(("1338 SecretChat: readEncryptedHistory done chat_id=%1 max_date=%2")
+			.arg(chatId)
+			.arg(maxDate));
+	}).fail([=](const MTP::Error &error) {
+		LOG(("1338 SecretChat: readEncryptedHistory failed chat_id=%1 max_date=%2 error=%3")
+			.arg(chatId)
+			.arg(maxDate)
+			.arg(error.type()));
+	}).send();
 }
 
 } // namespace Data::SecretChats

@@ -20,6 +20,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_saved_sublist.h"
 #include "data/data_session.h"
 #include "data/data_user.h"
+#include "data/secret/secret_chat_manager.h"
 #include "base/unixtime.h"
 #include "base/random.h"
 #include "main/main_session.h"
@@ -36,6 +37,51 @@ namespace {
 
 constexpr auto kReadRequestTimeout = 3 * crl::time(1000);
 constexpr auto kReportDeliveriesPerRequest = 50;
+
+[[nodiscard]] bool ReadSecretChatInboxTill(not_null<HistoryItem*> item) {
+	const auto history = item->history();
+	auto &manager = SecretChats::Manager(&history->session());
+	const auto chatId = manager.ChatIdForHistory(history);
+	if (!chatId) {
+		return false;
+	}
+	auto unread = history->unreadCount();
+	auto readTillDate = TimeId();
+	auto reached = false;
+	for (const auto &block : history->blocks) {
+		for (const auto &message : block->messages) {
+			const auto current = message->data();
+			if (!current->out() && current->unread(history)) {
+				current->markClientSideAsRead();
+				if (unread > 0) {
+					--unread;
+				}
+				readTillDate = std::max(readTillDate, current->date());
+			}
+			if (current == item) {
+				reached = true;
+				break;
+			}
+		}
+		if (reached) {
+			break;
+		}
+	}
+	if (!reached && !item->out() && item->unread(history)) {
+		item->markClientSideAsRead();
+		if (unread > 0) {
+			--unread;
+		}
+		readTillDate = std::max(readTillDate, item->date());
+	}
+	if (history->folderKnown()) {
+		history->setUnreadCount(unread);
+	}
+	if (readTillDate) {
+		manager.MarkReadTill(*chatId, readTillDate);
+	}
+	return true;
+}
 
 } // namespace
 
@@ -199,6 +245,9 @@ void Histories::readInbox(not_null<History*> history) {
 void Histories::readInboxTill(not_null<HistoryItem*> item) {
 	const auto history = item->history();
 	if (!item->isRegular()) {
+		if (ReadSecretChatInboxTill(item)) {
+			return;
+		}
 		readClientSideMessage(item);
 		auto view = item->mainView();
 		if (!view) {

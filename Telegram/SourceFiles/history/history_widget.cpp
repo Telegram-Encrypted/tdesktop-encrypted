@@ -82,6 +82,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_chat_filters.h"
 #include "data/data_file_origin.h"
 #include "data/data_histories.h"
+#include "data/secret/secret_chat_manager.h"
 #include "data/data_group_call.h"
 #include "data/data_message_reactions.h"
 #include "data/data_peer_values.h" // Data::AmPremiumValue.
@@ -1092,12 +1093,29 @@ void HistoryWidget::setGeometryWithTopMoved(
 }
 
 Dialogs::EntryState HistoryWidget::computeDialogsEntryState() const {
+	if (const auto chatId = shownSecretChatId()) {
+		if (const auto entry = Data::SecretChats::Manager(&session())
+				.EntryForChat(*chatId)) {
+			return Dialogs::EntryState{
+				.key = entry,
+				.section = Dialogs::EntryState::Section::History,
+				.currentReplyTo = replyTo(),
+				.currentSuggest = suggestOptions(),
+			};
+		}
+	}
 	return Dialogs::EntryState{
 		.key = _history,
 		.section = Dialogs::EntryState::Section::History,
 		.currentReplyTo = replyTo(),
 		.currentSuggest = suggestOptions(),
 	};
+}
+
+std::optional<int64_t> HistoryWidget::shownSecretChatId() const {
+	return _history
+		? Data::SecretChats::Manager(&session()).ChatIdForHistory(_history)
+		: std::nullopt;
 }
 
 void HistoryWidget::refreshJoinChannelText() {
@@ -1196,7 +1214,7 @@ void HistoryWidget::initVoiceRecordBar() {
 
 	_voiceRecordBar->sendActionUpdates(
 	) | rpl::on_next([=](const auto &data) {
-		if (!_history) {
+		if (!_history || shownSecretChatId()) {
 			return;
 		}
 		session().sendProgressManager().update(
@@ -1892,6 +1910,7 @@ void HistoryWidget::fieldChanged() {
 	InvokeQueued(this, [=] {
 		updateInlineBotQuery();
 		if (_history
+			&& !shownSecretChatId()
 			&& !_inlineBot
 			&& !_editMsgId
 			&& (!_autocomplete || !_autocomplete->stickersEmoji())
@@ -2481,9 +2500,7 @@ void HistoryWidget::showHistory(
 				}
 				return;
 			}
-			if (!IsServerMsgId(showAtMsgId)
-				&& !IsClientMsgId(showAtMsgId)
-				&& !IsServerMsgId(-showAtMsgId)) {
+			if (!isResolvableShowAtMessage(showAtMsgId)) {
 				// To end or to unread.
 				destroyUnreadBar();
 			}
@@ -3803,6 +3820,7 @@ void HistoryWidget::newItemAdded(not_null<HistoryItem*> item) {
 			if (item->isUnreadMention() && !item->isUnreadMedia()) {
 				session().api().markContentsRead(item);
 			}
+			markSecretMessageRead(item);
 			session().data().histories().readInboxOnNewMessage(item);
 
 			// Also clear possible scheduled messages notifications.
@@ -3843,6 +3861,14 @@ void HistoryWidget::maybeMarkReactionsRead(not_null<HistoryItem*> item) {
 		return;
 	}
 	session().api().markContentsRead(item);
+}
+
+void HistoryWidget::markSecretMessageRead(not_null<HistoryItem*> item) {
+	const auto chatId = shownSecretChatId();
+	if (!chatId || item->out()) {
+		return;
+	}
+	Data::SecretChats::Manager(&session()).MarkReadTill(*chatId, item->date());
 }
 
 void HistoryWidget::unreadCountUpdated() {
@@ -4084,6 +4110,9 @@ void HistoryWidget::firstLoadMessages() {
 	if (!_history || _firstLoadRequest) {
 		return;
 	}
+	if (shownSecretChatId()) {
+		return;
+	}
 
 	auto from = _history;
 	auto offsetId = MsgId();
@@ -4153,6 +4182,9 @@ void HistoryWidget::loadMessages() {
 	if (!_history || _preloadRequest) {
 		return;
 	}
+	if (shownSecretChatId()) {
+		return;
+	}
 
 	if (_history->isEmpty() && _migrated && _migrated->isEmpty()) {
 		return firstLoadMessages();
@@ -4209,6 +4241,9 @@ void HistoryWidget::loadMessages() {
 
 void HistoryWidget::loadMessagesDown() {
 	if (!_history || _preloadDownRequest) {
+		return;
+	}
+	if (shownSecretChatId()) {
 		return;
 	}
 
@@ -4277,6 +4312,9 @@ void HistoryWidget::delayedShowAt(
 		MsgId showAtMsgId,
 		const Window::SectionShow &params) {
 	if (!_history) {
+		return;
+	}
+	if (shownSecretChatId()) {
 		return;
 	}
 	_delayedShowAtMsgParams = params;
@@ -4791,6 +4829,8 @@ void HistoryWidget::sendVoice(const VoiceToSend &data) {
 void HistoryWidget::send(Api::SendOptions options) {
 	if (!_history) {
 		return;
+	} else if (sendSecretText(options)) {
+		return;
 	} else if (_editMsgId) {
 		saveEditMessage({});
 		return;
@@ -4863,6 +4903,56 @@ void HistoryWidget::send(Api::SendOptions options) {
 
 void HistoryWidget::sendWithModifiers(Qt::KeyboardModifiers modifiers) {
 	send({ .handleSupportSwitch = Support::HandleSwitch(modifiers) });
+}
+
+bool HistoryWidget::sendSecretText(Api::SendOptions options) {
+	const auto chatId = shownSecretChatId();
+	if (!chatId) {
+		return false;
+	}
+	if (_editMsgId
+		|| readyToForward()
+		|| _kbReplyTo
+		|| options.scheduled
+		|| !_preview->draft().url.isEmpty()) {
+		controller()->showToast(
+			u"Secret chats currently support plain text sending only."_q);
+		return true;
+	} else if (!HasSendText(_field)) {
+		return true;
+	}
+
+	const auto textWithTags = _field->getTextWithAppliedMarkdown();
+	const auto prepareFlags = Ui::ItemTextOptions(
+		_history,
+		session().user()).flags;
+	auto text = TextWithEntities{
+		textWithTags.text,
+		TextUtilities::ConvertTextTagsToEntities(textWithTags.tags) };
+	TextUtilities::PrepareForSending(text, prepareFlags);
+	if (!Data::SecretChats::Manager(&session()).SendText(
+			*chatId,
+			text,
+			replyTo())) {
+		return true;
+	}
+
+	clearFieldText();
+	cancelReply(false);
+	if (_preview) {
+		_preview->apply({ .removed = true });
+	}
+	saveDraftWithTextNow();
+	hideSelectorControlsAnimated();
+	setInnerFocus();
+
+	if (!_keyboard->hasMarkup() && _keyboard->forceReply() && !_kbReplyTo) {
+		toggleKeyboard();
+	}
+	session().changes().historyUpdated(
+		_history,
+		Data::HistoryUpdate::Flag::MessageSent);
+	return true;
 }
 
 void HistoryWidget::sendScheduled(Api::SendOptions initialOptions) {
@@ -6896,10 +6986,7 @@ bool HistoryWidget::hasSavedScroll() const {
 int HistoryWidget::countInitialScrollTop() {
 	if (hasSavedScroll()) {
 		return _list->historyScrollTop();
-	} else if (_showAtMsgId
-		&& (IsServerMsgId(_showAtMsgId)
-			|| IsClientMsgId(_showAtMsgId)
-			|| IsServerMsgId(-_showAtMsgId))) {
+	} else if (isResolvableShowAtMessage(_showAtMsgId)) {
 		const auto item = getItemFromHistoryOrMigrated(_showAtMsgId);
 		const auto itemTop = _list->itemTop(item);
 		if (itemTop < 0) {
@@ -8811,7 +8898,8 @@ void HistoryWidget::processReply() {
 		}
 		return processCancel();
 #endif
-	} else if (!_processingReplyItem->isRegular()) {
+	} else if (!_processingReplyItem->isRegular()
+		&& !shownSecretChatId()) {
 		return processCancel();
 	} else if (const auto forum = _peer->forum()
 		; forum && _processingReplyItem->history() == _history) {
@@ -9232,6 +9320,12 @@ void HistoryWidget::handlePeerUpdate() {
 }
 
 bool HistoryWidget::updateCanSendMessage() {
+	if (shownSecretChatId()) {
+		const auto changed = !_canSendMessages || !_canSendTexts;
+		_canSendMessages = true;
+		_canSendTexts = true;
+		return changed;
+	}
 	if (!_peer) {
 		return false;
 	}
@@ -9358,6 +9452,14 @@ HistoryItem *HistoryWidget::getItemFromHistoryOrMigrated(
 		: _peer
 		? session().data().message(_peer, genericMsgId)
 		: nullptr;
+}
+
+bool HistoryWidget::isResolvableShowAtMessage(MsgId msgId) const {
+	return msgId
+		&& (IsServerMsgId(msgId)
+			|| IsClientMsgId(msgId)
+			|| IsServerMsgId(-msgId)
+			|| getItemFromHistoryOrMigrated(msgId));
 }
 
 MessageIdsList HistoryWidget::getSelectedItems() const {

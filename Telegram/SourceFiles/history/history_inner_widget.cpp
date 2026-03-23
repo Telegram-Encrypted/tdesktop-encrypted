@@ -67,6 +67,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "chat_helpers/emoji_interactions.h"
 #include "history/history_widget.h"
 #include "history/view/history_view_translate_tracker.h"
+#include "data/secret/secret_chat_manager.h"
 #include "base/platform/base_platform_info.h"
 #include "base/qt/qt_common_adapters.h"
 #include "base/qt/qt_key_modifiers.h"
@@ -606,14 +607,16 @@ void HistoryInner::setupSwipeReplyAndBack() {
 				not_null<Element*> view,
 				int itemtop,
 				int itembottom) {
+			const auto item = view->data();
+			const auto secretChat = Data::SecretChats::Manager(
+				&item->history()->session()).ChatIdForHistory(item->history());
 			if ((cursorTop < itemtop)
 				|| (cursorTop > itembottom)
-				|| !view->data()->isRegular()
-				|| view->data()->showSimilarChannels()
-				|| view->data()->isService()) {
+				|| (!item->isRegular() && !secretChat)
+				|| item->showSimilarChannels()
+				|| item->isService()) {
 				return true;
 			}
-			const auto item = view->data();
 			const auto canSendReply = CanSendReply(item);
 			const auto canReply = (canSendReply || item->allowsForward());
 			if (!canReply) {
@@ -2762,7 +2765,12 @@ void HistoryInner::showContextMenu(QContextMenuEvent *e, bool showFromTouch) {
 	};
 
 	const auto addReplyAction = [&](HistoryItem *item) {
-		if (!item || !item->isRegular()) {
+		if (!item) {
+			return;
+		}
+		const auto secretChat = Data::SecretChats::Manager(
+			&item->history()->session()).ChatIdForHistory(item->history());
+		if (!item->isRegular() && !secretChat) {
 			return;
 		}
 		const auto canSendReply = CanSendReply(item);
@@ -5183,6 +5191,10 @@ auto HistoryInner::DelegateMixin()
 }
 
 bool CanSendReply(not_null<const HistoryItem*> item) {
+	if (Data::SecretChats::Manager(
+			&item->history()->session()).ChatIdForHistory(item->history())) {
+		return true;
+	}
 	const auto peer = item->history()->peer;
 	if (const auto topic = item->topic()) {
 		return Data::CanSendAnything(topic);

@@ -21,6 +21,7 @@ uint64_t ReadLE64(const char *data);
 QString BytesToHex(const QByteArray &data, int maxBytes = -1);
 QString SecretMessageEntityName(uint32_t constructor);
 QString SecretMediaConstructorName(uint32_t constructor);
+QString SecretServiceActionName(uint32_t constructor);
 
 void AppendUInt32(QByteArray &data, uint32_t value);
 void AppendInt32(QByteArray &data, int32_t value);

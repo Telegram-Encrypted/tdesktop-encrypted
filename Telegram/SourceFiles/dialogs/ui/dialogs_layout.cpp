@@ -49,12 +49,16 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "styles/style_dialogs.h"
 #include "styles/style_widgets.h"
 #include "styles/style_window.h"
+#include "data/secret/secret_chat_manager.h"
+#include "dialogs/secret_chat_entry.h"
 
 namespace Dialogs::Ui {
 namespace {
 
 const auto kPsaBadgePrefix = "cloud_lng_badge_psa_";
 const auto kSecretChatNameColor = QColor(0x4E, 0xAD, 0x41);
+constexpr auto kSecretChatIconOffset = QPoint(-3, -2);
+constexpr auto kSecretChatIconTextSkip = 0;
 
 void PaintTintedIcon(
 		Painter &p,
@@ -491,6 +495,16 @@ void PaintRow(
 			? tr::lng_badge_psa_default(tr::now)
 			: custom;
 		PaintRowTopRight(p, text, rectForName, context);
+	} else if (entry->asSecretChat()) {
+		PaintTintedIcon(
+			p,
+			st::dialogsUnlockIcon,
+			rectForName.topLeft() + kSecretChatIconOffset,
+			kSecretChatNameColor);
+		rectForName.setLeft(rectForName.left()
+			+ kSecretChatIconOffset.x()
+			+ st::dialogsUnlockIcon.width()
+			+ kSecretChatIconTextSkip);
 	} else if (verifyInfo) {
 		if (!rowBadge.ready(verifyInfo)) {
 			rowBadge.set(
@@ -509,15 +523,6 @@ void PaintRow(
 				+ chatTypeIcon->width()
 				+ st::dialogsChatTypeSkip);
 		}
-	} else if (entry->asSecretChat()) {
-		PaintTintedIcon(
-			p,
-			st::dialogsUnlockIcon,
-			rectForName.topLeft(),
-			kSecretChatNameColor);
-		rectForName.setLeft(rectForName.left()
-			+ st::dialogsUnlockIcon.width()
-			+ st::dialogsChatTypeSkip);
 	}
 	auto texttop = context.st->textTop;
 	if (const auto folder = entry->asFolder()) {
@@ -820,7 +825,7 @@ void PaintRow(
 			rectForName.top(),
 			context.width,
 			text);
-	} else if (from) {
+	} else if (from && !entry->asSecretChat()) {
 		if ((history || sublist) && !context.search) {
 			paintPeerBadge(rowName.maxWidth());
 		}
@@ -859,22 +864,11 @@ void PaintRow(
 					? st::dialogsNameFgOver
 					: st::dialogsNameFg));
 		}
-		if (entry->asSecretChat()) {
-			const auto text = st::semiboldFont->elided(
-				entry->chatListName(),
-				rectForName.width());
-			p.drawTextLeft(
-				rectForName.left(),
-				rectForName.top(),
-				context.width,
-				text);
-		} else {
-			rowName.draw(p, {
-				.position = rectForName.topLeft(),
-				.availableWidth = rectForName.width(),
-				.elisionLines = 1,
-			});
-		}
+		rowName.draw(p, {
+			.position = rectForName.topLeft(),
+			.availableWidth = rectForName.width(),
+			.elisionLines = 1,
+		});
 	}
 
 	if (const auto tags = context.chatsFilterTags) {
@@ -1032,6 +1026,7 @@ void RowPainter::Paint(
 	const auto displayPinnedIcon = badgesState.empty()
 		&& entry->isPinnedDialog(context.filter)
 		&& (context.filter || !entry->fixedOnTopIndex());
+	const auto secret = entry->asSecretChat();
 
 	const auto from = history
 		? (history->peer->migrateTo()
@@ -1039,6 +1034,9 @@ void RowPainter::Paint(
 			: history->peer.get())
 		: sublist
 		? sublist->sublistPeer().get()
+		: secret
+		? Data::SecretChats::Manager(&entry->session()).DisplayUserForChat(
+			secret->chatId())
 		: nullptr;
 	const auto allowUserOnline = true;// !context.narrow || badgesState.empty();
 	const auto flags = (allowUserOnline ? Flag::AllowUserOnline : Flag(0))

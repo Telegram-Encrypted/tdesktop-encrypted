@@ -7,6 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "history/view/history_view_top_bar_widget.h"
 
+#include "data/secret/secret_chat_manager.h"
 #include "history/history.h"
 #include "history/view/history_view_send_action.h"
 #include "boxes/add_contact_box.h"
@@ -56,6 +57,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_changes.h"
 #include "data/data_forum_topic.h"
 #include "data/data_send_action.h"
+#include "dialogs/secret_chat_entry.h"
 #include "dialogs/dialogs_main_list.h"
 #include "chat_helpers/emoji_interactions.h"
 #include "base/call_delayed.h"
@@ -75,11 +77,54 @@ namespace HistoryView {
 namespace {
 
 constexpr auto kEmojiInteractionSeenDuration = 3 * crl::time(1000);
+const auto kSecretChatNameColor = QColor(0x4E, 0xAD, 0x41);
+constexpr auto kSecretChatIconOffset = QPoint(0, -2);
 
 [[nodiscard]] inline bool HasGroupCallMenu(not_null<PeerData*> peer) {
 	return !peer->isUser()
 		&& !peer->groupCall()
 		&& peer->canManageGroupCall();
+}
+
+[[nodiscard]] Dialogs::SecretChatEntry *SecretChatEntryFromState(
+		Main::Session &session,
+		const Dialogs::EntryState &state) {
+	if (!state.key) {
+		return nullptr;
+	}
+	if (const auto secret = state.key.entry()->asSecretChat()) {
+		return secret;
+	}
+	if (const auto history = state.key.history()) {
+		if (const auto chatId = Data::SecretChats::Manager(&session)
+				.ChatIdForHistory(history)) {
+			if (const auto entry = Data::SecretChats::Manager(&session)
+					.EntryForChat(*chatId)) {
+				return entry->asSecretChat();
+			}
+		}
+	}
+	return nullptr;
+}
+
+void PaintTintedIcon(
+		Painter &p,
+		const style::icon &icon,
+		QPoint position,
+		const QColor &color) {
+	const auto ratio = style::DevicePixelRatio();
+	auto image = QImage(
+		QSize(icon.width() * ratio, icon.height() * ratio),
+		QImage::Format_ARGB32_Premultiplied);
+	image.fill(Qt::transparent);
+	image.setDevicePixelRatio(ratio);
+	{
+		Painter q(&image);
+		icon.paint(q, QPoint(0, 0), icon.width());
+		q.setCompositionMode(QPainter::CompositionMode_SourceIn);
+		q.fillRect(QRect(QPoint(0, 0), QSize(icon.width(), icon.height())), color);
+	}
+	p.drawImage(position, image);
 }
 
 QString TopBarNameText(
@@ -537,6 +582,32 @@ void TopBarWidget::paintTopBar(Painter &p) {
 	}
 
 	const auto now = crl::now();
+	if (const auto secret = SecretChatEntryFromState(session(), _activeChat)) {
+		const auto &manager = Data::SecretChats::Manager(&session());
+		auto textLeft = nameleft + st::dialogsUnlockIcon.width()
+			+ st::dialogsChatTypeSkip;
+		auto textWidth = namewidth - st::dialogsUnlockIcon.width()
+			- st::dialogsChatTypeSkip;
+		textWidth = std::max(textWidth, 0);
+		PaintTintedIcon(
+			p,
+			st::dialogsUnlockIcon,
+			QPoint(nameleft, nametop) + kSecretChatIconOffset,
+			kSecretChatNameColor);
+		p.setPen(kSecretChatNameColor);
+		p.setFont(st::semiboldFont);
+		p.drawTextLeft(
+			textLeft,
+			nametop,
+			width(),
+			st::semiboldFont->elided(
+				manager.DisplayNameForChat(secret->chatId()),
+				textWidth));
+
+		p.setFont(st::dialogsTextFont);
+		paintStatus(p, statusleft, statustop, statuswidth, width());
+		return;
+	}
 	const auto peer = _activeChat.key.owningHistory()
 		? _activeChat.key.owningHistory()->peer.get()
 		: nullptr;
@@ -803,6 +874,12 @@ void TopBarWidget::infoClicked() {
 	const auto key = _activeChat.key;
 	if (!key) {
 		return;
+	} else if (const auto secret = SecretChatEntryFromState(session(), _activeChat)) {
+		if (const auto user = Data::SecretChats::Manager(&session())
+				.DisplayUserForChat(secret->chatId())) {
+			_controller->showPeerInfo(user);
+		}
+		return;
 	} else if (const auto topic = key.topic()) {
 		_controller->showSection(std::make_shared<Info::Memento>(topic));
 	} else if (const auto sublist = key.sublist()) {
@@ -983,6 +1060,22 @@ void TopBarWidget::refreshInfoButton() {
 		|| (_activeChat.section == Section::ChatsList
 			&& !rootChatsListBar())) {
 		_info.destroy();
+	} else if (const auto secret = SecretChatEntryFromState(session(), _activeChat)) {
+		if (const auto user = Data::SecretChats::Manager(&session())
+				.DisplayUserForChat(secret->chatId())) {
+			auto info = object_ptr<Ui::UserpicButton>(
+				this,
+				_controller,
+				user->userpicPaintingPeer(),
+				Ui::UserpicButton::Role::Custom,
+				Ui::UserpicButton::Source::PeerPhoto,
+				st::topBarInfoButton,
+				user->userpicShape());
+			_info.destroy();
+			_info = std::move(info);
+		} else {
+			_info.destroy();
+		}
 	} else if (const auto peer = _activeChat.key.peer()) {
 		const auto sublist = _activeChat.key.sublist();
 		const auto infoPeer = sublist ? sublist->sublistPeer().get() : peer;
@@ -1021,6 +1114,10 @@ int TopBarWidget::countSelectedButtonsTop(float64 selectedShown) {
 }
 
 void TopBarWidget::updateSearchVisibility() {
+	if (SecretChatEntryFromState(session(), _activeChat)) {
+		_search->setVisible(false);
+		return;
+	}
 	const auto searchAllowedMode = (_activeChat.section == Section::History)
 		|| (_activeChat.section == Section::Replies)
 		|| (_activeChat.section == Section::SavedSublist
@@ -1699,6 +1796,11 @@ void TopBarWidget::setupDragOnBackButton() {
 }
 
 bool TopBarWidget::trackOnlineOf(not_null<PeerData*> user) const {
+	if (const auto secret = SecretChatEntryFromState(session(), _activeChat)) {
+		return Data::SecretChats::Manager(&session())
+			.DisplayUserForChat(secret->chatId())
+			== user;
+	}
 	const auto peer = _activeChat.key.peer();
 	if (!peer || _activeChat.key.topic() || !user->isUser()) {
 		return false;
@@ -1716,6 +1818,24 @@ bool TopBarWidget::trackOnlineOf(not_null<PeerData*> user) const {
 }
 
 void TopBarWidget::updateOnlineDisplay() {
+	if (const auto secret = SecretChatEntryFromState(session(), _activeChat)) {
+		const auto &manager = Data::SecretChats::Manager(&session());
+		const auto now = base::unixtime::now();
+		const auto user = manager.DisplayUserForChat(secret->chatId());
+		const auto text = manager.DisplayStatusForChat(secret->chatId());
+		const auto titlePeerTextOnline = user
+			? Data::OnlineTextActive(user, now)
+			: false;
+		if (_titlePeerText.toString() != text
+			|| _titlePeerTextOnline != titlePeerTextOnline) {
+			_titlePeerText.setText(st::dialogsTextStyle, text);
+			_titlePeerTextOnline = titlePeerTextOnline;
+			updateMembersShowArea();
+			update();
+		}
+		updateOnlineDisplayTimer();
+		return;
+	}
 	const auto peer = _activeChat.key.peer();
 	if (!peer || _activeChat.key.topic()) {
 		return;
@@ -1821,6 +1941,16 @@ void TopBarWidget::updateOnlineDisplay() {
 
 void TopBarWidget::updateOnlineDisplayTimer() {
 	const auto peer = _activeChat.key.peer();
+	if (const auto secret = SecretChatEntryFromState(session(), _activeChat)) {
+		if (const auto user = Data::SecretChats::Manager(&session())
+				.DisplayUserForChat(secret->chatId())) {
+			const auto timeout = Data::OnlineChangeTimeout(
+				not_null{ user },
+				base::unixtime::now());
+			updateOnlineDisplayIn(timeout);
+		}
+		return;
+	}
 	if (!peer) {
 		return;
 	}

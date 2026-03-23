@@ -18,8 +18,9 @@ The source code is published under GPLv3 with OpenSSL exception, the license is 
  - [x] Decrypt incoming messages, encrypt outgoing messages
  - [x] A simple UI that can handle sending & receiving text messages
  - [x] Proper & Secure storage of chats and messages
- - [ ] Support stickers, documents, pictures, text formatting
- - [ ] Support read receipts, typing & online events, message deletion
+ - [x] Support text formatting, replies, contact mapping/ui.
+ - [ ] Support stickers, documents, pictures.
+ - [ ] Support services: read receipts, typing, message deletion
  - [ ] Handle key rotation properly
  - [ ] Create encrypted group chats that works the same way SimpleX works.
 

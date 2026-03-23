@@ -2068,7 +2068,11 @@ void Updates::feedUpdate(const MTPUpdate &update) {
 	} break;
 
 	case mtpc_updateEncryptedChatTyping: {
-		LOG(("1336 SecretChat: updateEncryptedChatTyping received."));
+		const auto &d = update.c_updateEncryptedChatTyping();
+		LOG(("1336 SecretChat: updateEncryptedChatTyping received chat_id=%1")
+			.arg(d.vchat_id().v));
+		Data::SecretChats::Manager(&session()).HandleEncryptedTyping(
+			int64(d.vchat_id().v));
 	} break;
 
 	case mtpc_updateEncryption: {
@@ -2104,7 +2108,14 @@ void Updates::feedUpdate(const MTPUpdate &update) {
 	} break;
 
 	case mtpc_updateEncryptedMessagesRead: {
-		LOG(("1338 SecretChat: updateEncryptedMessagesRead received."));
+		const auto &d = update.c_updateEncryptedMessagesRead();
+		LOG(("1338 SecretChat: updateEncryptedMessagesRead received chat_id=%1 max_date=%2 date=%3")
+			.arg(d.vchat_id().v)
+			.arg(d.vmax_date().v)
+			.arg(d.vdate().v));
+		Data::SecretChats::Manager(&session()).HandleEncryptedMessagesRead(
+			int64(d.vchat_id().v),
+			d.vmax_date().v);
 	} break;
 
 

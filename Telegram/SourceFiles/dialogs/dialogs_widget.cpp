@@ -10,6 +10,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/call_delayed.h"
 #include "base/qt/qt_key_modifiers.h"
 #include "base/options.h"
+#include "data/secret/secret_chat_manager.h"
 #include "dialogs/secret_chat_entry.h"
 #include "dialogs/ui/chat_search_in.h"
 #include "dialogs/ui/dialogs_stories_content.h"
@@ -26,7 +27,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/view/history_view_contact_status.h"
 #include "history/view/history_view_group_call_bar.h"
 #include "history/view/history_view_requests_bar.h"
-#include "history/view/secret_chat_section.h"
 #include "history/view/history_view_top_bar_widget.h"
 #include "boxes/peers/edit_peer_requests_box.h"
 #include "boxes/choose_filter_box.h"
@@ -996,9 +996,10 @@ void Widget::chosenRow(const ChosenRow &row) {
 		}
 	} else if (const auto secret = row.key.entry()->asSecretChat()) {
 		if (!row.newWindow) {
-			controller()->showSection(
-				std::make_shared<HistoryView::SecretChatMemento>(
+			controller()->showThread(
+				Data::SecretChats::Manager(&session()).ViewHistoryForChat(
 					secret->chatId()),
+				ShowAtUnreadMsgId,
 				Window::SectionShow(Window::SectionShow::Way::ClearStack));
 			hideChildList();
 		}

@@ -92,14 +92,21 @@ std::optional<QString> SecretTlReader::ReadTLString() {
 
 QString SecretMessageEntityName(uint32_t constructor) {
 	switch (constructor) {
+	case 0xfa04579d: return QStringLiteral("mention");
+	case 0x6f635b0d: return QStringLiteral("hashtag");
+	case 0x6cef8ac7: return QStringLiteral("bot_command");
+	case 0x6ed02538: return QStringLiteral("url");
+	case 0x64e475c2: return QStringLiteral("email");
 	case 0xbd610bc9: return QStringLiteral("bold");
 	case 0x826f8b60: return QStringLiteral("italic");
 	case 0x28a20571: return QStringLiteral("code");
 	case 0x73924be0: return QStringLiteral("pre");
 	case 0x32ca960f: return QStringLiteral("spoiler");
-	case 0x9c4e7e8b: return QStringLiteral("strike");
-	case 0xfa04579d: return QStringLiteral("underline");
-	case 0x6ed02538: return QStringLiteral("blockquote");
+	case 0x76a6d327: return QStringLiteral("text_url");
+	case 0x9c4e7e8b: return QStringLiteral("underline");
+	case 0xbf0693d4: return QStringLiteral("strike");
+	case 0x020df5d0: return QStringLiteral("blockquote");
+	case 0xc8cf05f8: return QStringLiteral("custom_emoji");
 	default: return QString("unknown(%1)").arg(FormatUint32Hex(constructor));
 	}
 }
@@ -115,6 +122,25 @@ QString SecretMediaConstructorName(uint32_t constructor) {
 	case 0xfa95b0dd: return QStringLiteral("decryptedMessageMediaExternalDocument");
 	case 0x8a0df56f: return QStringLiteral("decryptedMessageMediaVenue");
 	case 0xe50511d8: return QStringLiteral("decryptedMessageMediaWebPage");
+	default: return QString("unknown(%1)").arg(FormatUint32Hex(constructor));
+	}
+}
+
+QString SecretServiceActionName(uint32_t constructor) {
+	switch (constructor) {
+	case 0xa1733aec: return QStringLiteral("set_ttl");
+	case 0x0c4f40be: return QStringLiteral("read_messages");
+	case 0x65614304: return QStringLiteral("delete_messages");
+	case 0x8ac1f475: return QStringLiteral("screenshot_messages");
+	case 0x6719e45c: return QStringLiteral("flush_history");
+	case 0x511110b0: return QStringLiteral("resend");
+	case 0xf3048883: return QStringLiteral("notify_layer");
+	case 0xccb27641: return QStringLiteral("typing");
+	case 0xf3c9611b: return QStringLiteral("request_key");
+	case 0x6fe1735b: return QStringLiteral("accept_key");
+	case 0xdd05ec6b: return QStringLiteral("abort_key");
+	case 0xec2e0b9b: return QStringLiteral("commit_key");
+	case 0xa82fdd63: return QStringLiteral("noop");
 	default: return QString("unknown(%1)").arg(FormatUint32Hex(constructor));
 	}
 }

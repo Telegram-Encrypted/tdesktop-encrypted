@@ -30,12 +30,14 @@ struct SecretParsedEntity {
 	uint32_t constructor = 0;
 	int32_t offset = 0;
 	int32_t length = 0;
+	QString data;
 };
 
 struct SecretParsedTextMessage {
 	int64_t chatId = 0;
 	SecretParsedEnvelope envelope;
 	uint64_t randomId = 0;
+	uint64_t replyToRandomId = 0;
 	uint32_t flags = 0;
 	int32_t ttl = 0;
 	QString text;
