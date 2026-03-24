@@ -55,6 +55,7 @@ public:
 	[[nodiscard]] Dialogs::Entry *EntryForChat(int64_t chatId) const;
 	[[nodiscard]] not_null<History*> ViewHistoryForChat(int64_t chatId);
 	[[nodiscard]] const std::vector<FullMsgId> &ViewMessageIds(int64_t chatId);
+	[[nodiscard]] std::optional<int64_t> ChatIdForUser(UserId userId) const;
 	[[nodiscard]] std::optional<int64_t> ChatIdForHistory(
 		not_null<const History*> history) const;
 	[[nodiscard]] std::optional<int64_t> ChatIdForPeer(PeerId peerId) const;
@@ -68,6 +69,15 @@ public:
 	[[nodiscard]] UserData *DisplayUserForChat(int64_t chatId) const;
 	[[nodiscard]] QString DisplayNameForChat(int64_t chatId) const;
 	[[nodiscard]] QString DisplayStatusForChat(int64_t chatId) const;
+	[[nodiscard]] QString WaitingStatusForChat(int64_t chatId) const;
+	[[nodiscard]] bool IsChatReady(int64_t chatId) const;
+	[[nodiscard]] bool StartChat(
+		not_null<UserData*> user,
+		Fn<void(int64_t)> onReady = nullptr);
+	void UpdateTyping(int64_t chatId);
+	void CancelTyping(int64_t chatId);
+	void HandleEncryptedChatWaiting(const MTPEncryptedChat &chat);
+	void HandleEncryptedChatEstablished(const MTPEncryptedChat &chat);
 	void HandleEncryptedTyping(int64_t chatId);
 	void HandleEncryptedMessagesRead(int64_t chatId, TimeId maxDate);
 	void MarkReadTill(int64_t chatId, TimeId maxDate);
@@ -82,7 +92,10 @@ private:
 	void EnsureEntryForChat(const SecretChatDescriptor &descriptor);
 	void UpsertKnownChat(const SecretChatState &state);
 	[[nodiscard]] RenderState &EnsureRenderState(int64_t chatId);
-	void AppendRenderedMessage(RenderState &state, const SecretParsedMessage &message);
+	void AppendRenderedMessage(
+		RenderState &state,
+		const SecretParsedMessage &message,
+		bool restored = false);
 	void AdvanceIncomingState(const SecretParsedMessage &message);
 	void RefreshChatListEntry(not_null<Dialogs::SecretChatEntry*> entry);
 	void StoreParsedMessage(int64_t chatId, SecretParsedMessage message);
@@ -97,6 +110,9 @@ private:
 	std::map<int64_t, std::unique_ptr<RenderState>> _rendered;
 	std::map<int64_t, std::unique_ptr<base::Timer>> _typingTimers;
 	std::map<int64_t, crl::time> _typingUntil;
+	std::map<int64_t, std::unique_ptr<base::Timer>> _outgoingTypingTimers;
+	std::map<int64_t, crl::time> _outgoingTypingUpdated;
+	std::map<int64_t, bool> _outgoingTypingActive;
 	std::map<int64_t, TimeId> _readTillSent;
 	rpl::event_stream<int64_t> _messageUpdates;
 	rpl::event_stream<int64_t> _presentationUpdates;

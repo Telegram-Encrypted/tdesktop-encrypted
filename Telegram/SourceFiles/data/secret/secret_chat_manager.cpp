@@ -34,6 +34,9 @@ namespace Data::SecretChats {
 namespace {
 
 constexpr auto kSecretTypingTimeout = 6 * crl::time(1000);
+constexpr auto kSecretTypingCancelTimeout = 5 * crl::time(1000);
+constexpr auto kSecretSendMyTypingInterval = 5 * crl::time(1000);
+constexpr auto kSecretLayer = 73;
 
 } // namespace
 
@@ -453,7 +456,7 @@ auto SecretChatManager::EnsureRenderState(int64_t chatId) -> RenderState& {
 	state->history->getReadyFor(ShowAtTheEndMsgId);
 	if (const auto i = _messages.find(chatId); i != _messages.end()) {
 		for (const auto &message : i.value()) {
-			AppendRenderedMessage(*state, message);
+			AppendRenderedMessage(*state, message, true);
 		}
 	}
 	auto raw = state.get();
@@ -463,7 +466,8 @@ auto SecretChatManager::EnsureRenderState(int64_t chatId) -> RenderState& {
 
 void SecretChatManager::AppendRenderedMessage(
 		RenderState &state,
-		const SecretParsedMessage &message) {
+		const SecretParsedMessage &message,
+		bool restored) {
 	const auto &envelope = MessageEnvelope(message);
 	const auto chatId = std::visit([](const auto &value) {
 		return value.chatId;
@@ -472,6 +476,12 @@ void SecretChatManager::AppendRenderedMessage(
 		const auto loaded = DisplayUserForChat(chatId);
 		return loaded ? loaded->id : state.peerId;
 	}();
+	const auto activityUser = restored && !envelope.outgoing
+		? DisplayUserForChat(chatId)
+		: nullptr;
+	const auto previousLastseen = activityUser
+		? std::optional(activityUser->lastseen())
+		: std::nullopt;
 	auto fields = HistoryItemCommonFields{
 		.id = state.history->nextNonHistoryEntryId(),
 		.flags = (MessageFlag::HasFromId
@@ -493,6 +503,13 @@ void SecretChatManager::AppendRenderedMessage(
 		std::move(fields),
 		RenderMessageText(message),
 		MTP_messageMediaEmpty());
+	if (activityUser && previousLastseen
+		&& activityUser->updateLastseen(*previousLastseen)) {
+		_session->data().maybeStopWatchForOffline(activityUser);
+		_session->changes().peerUpdated(
+			activityUser,
+			Data::PeerUpdate::Flag::OnlineStatus);
+	}
 	state.ids.push_back(item->fullId());
 	if (const auto randomId = MessageRandomId(message)) {
 		state.randomIds.emplace(randomId, item->fullId());
@@ -707,7 +724,7 @@ void SecretChatManager::HandleEncryptedChatRequested(
 					state.admin_id = static_cast<uint64>(accepted.vadmin_id().v);
 					state.participant_id = static_cast<uint64>(accepted.vparticipant_id().v);
 					state.is_creator = false; // The remote side requested this chat; we are the acceptor.
-					state.layer = 73;
+					state.layer = kSecretLayer;
 					state.key_fingerprint = keyFingerprint;
 					state.auth_key = paddedAuthKey;
 
@@ -809,6 +826,114 @@ void SecretChatManager::LogEncryptionChat(const MTPEncryptedChat &chat, const ch
 	}
 }
 
+void SecretChatManager::HandleEncryptedChatWaiting(const MTPEncryptedChat &chat) {
+	if (chat.type() != mtpc_encryptedChatWaiting) {
+		return;
+	}
+	const auto &waiting = chat.c_encryptedChatWaiting();
+	auto existing = LoadState(waiting.vid().v);
+	if (!existing.has_value()) {
+		LOG(("1337 SecretChat: encryptedChatWaiting ignored, missing local creator state id=%1")
+			.arg(waiting.vid().v));
+		return;
+	}
+	auto state = *existing;
+	state.chat_id = waiting.vid().v;
+	state.access_hash = static_cast<uint64>(waiting.vaccess_hash().v);
+	state.admin_id = static_cast<uint64>(waiting.vadmin_id().v);
+	state.participant_id = static_cast<uint64>(waiting.vparticipant_id().v);
+	state.is_creator = true;
+	if (!SaveState(state)) {
+		LOG(("1337 SecretChat: failed to save waiting creator state id=%1")
+			.arg(waiting.vid().v));
+	}
+}
+
+void SecretChatManager::HandleEncryptedChatEstablished(const MTPEncryptedChat &chat) {
+	if (chat.type() != mtpc_encryptedChat) {
+		return;
+	}
+	const auto &established = chat.c_encryptedChat();
+	const auto chatId = int64_t(established.vid().v);
+	const auto accessHash = static_cast<uint64>(established.vaccess_hash().v);
+	const auto adminId = static_cast<uint64>(established.vadmin_id().v);
+	const auto participantId = static_cast<uint64>(established.vparticipant_id().v);
+	const auto gAOrB = established.vg_a_or_b().v;
+	const auto remoteFingerprint = static_cast<uint64>(established.vkey_fingerprint().v);
+	auto state = LoadState(chatId);
+	if (!state.has_value()) {
+		LOG(("1337 SecretChat: encryptedChat ignored, missing local state id=%1")
+			.arg(chatId));
+		return;
+	}
+	if (!state->is_creator || state->pending_random_power.isEmpty()) {
+		return;
+	}
+	const auto randomPower = state->pending_random_power;
+	_session->api().request(MTPmessages_GetDhConfig(
+		MTP_int(0),
+		MTP_int(MTP::ModExpFirst::kRandomPowerSize)
+	)).done([=](const MTPmessages_DhConfig &result) {
+		result.match([&](const MTPDmessages_dhConfig &data) {
+			auto primeBytes = bytes::make_vector(data.vp().v);
+			if (!MTP::IsPrimeAndGood(primeBytes, data.vg().v)) {
+				LOG(("1337 SecretChat: bad p/g while finalizing outgoing secret chat id=%1")
+					.arg(chatId));
+				return;
+			}
+			const auto computedAuthKey = MTP::CreateAuthKey(
+				bytes::make_span(gAOrB),
+				bytes::make_span(
+					reinterpret_cast<const uchar*>(randomPower.constData()),
+					size_t(randomPower.size())),
+				primeBytes);
+			if (computedAuthKey.empty()) {
+				LOG(("1337 SecretChat: CreateAuthKey failed while finalizing outgoing secret chat id=%1")
+					.arg(chatId));
+				return;
+			}
+			MTP::AuthKey::Data paddedAuthKey = {};
+			MTP::AuthKey::FillData(paddedAuthKey, computedAuthKey);
+			const auto authKeySha1 = openssl::Sha1(bytes::make_span(paddedAuthKey));
+			auto keyFingerprint = uint64_t(0);
+			std::memcpy(&keyFingerprint, authKeySha1.data() + 12, 8);
+			if (keyFingerprint != remoteFingerprint) {
+				LOG(("1337 SecretChat: key fingerprint mismatch while finalizing outgoing secret chat id=%1 local=%2 remote=%3")
+					.arg(chatId)
+					.arg(FormatUint64(keyFingerprint))
+					.arg(FormatUint64(remoteFingerprint)));
+				return;
+			}
+			auto ready = *state;
+			ready.chat_id = chatId;
+			ready.access_hash = accessHash;
+			ready.admin_id = adminId;
+			ready.participant_id = participantId;
+			ready.is_creator = true;
+			ready.layer = kSecretLayer;
+			ready.key_fingerprint = keyFingerprint;
+			ready.auth_key = paddedAuthKey;
+			ready.pending_random_power = QByteArray();
+			if (!SaveState(ready)) {
+				LOG(("1337 SecretChat: failed to save finalized outgoing secret chat id=%1")
+					.arg(chatId));
+				return;
+			}
+			RefreshPresentation(chatId);
+			LOG(("1337 SecretChat: finalized outgoing secret chat id=%1 key_fingerprint=%2")
+				.arg(chatId)
+				.arg(FormatUint64(keyFingerprint)));
+		}, [&](const MTPDmessages_dhConfigNotModified &data) {
+			LOG(("1337 SecretChat: getDhConfig not modified while finalizing outgoing secret chat id=%1 random_size=%2")
+				.arg(chatId)
+				.arg(data.vrandom().v.size()));
+		});
+	}).fail([=](const MTP::Error &error) {
+		LOG(("1337 SecretChat: getDhConfig failed while finalizing outgoing secret chat id=%1")
+			.arg(chatId));
+	}).send();
+}
+
 bool SecretChatManager::SaveState(const SecretChatState &state) const {
 	const auto saved = SaveSecretChatState(_session, state);
 	if (saved) {
@@ -822,6 +947,16 @@ bool SecretChatManager::SaveState(const SecretChatState &state) const {
 
 const QVector<SecretChatDescriptor> &SecretChatManager::KnownChats() const {
 	return _knownChats;
+}
+
+std::optional<int64_t> SecretChatManager::ChatIdForUser(UserId userId) const {
+	for (const auto &[chatId, state] : _states) {
+		const auto remoteUserId = RemoteUserIdForState(_session, state);
+		if (remoteUserId && (*remoteUserId == userId)) {
+			return chatId;
+		}
+	}
+	return std::nullopt;
 }
 
 std::optional<SecretChatState> SecretChatManager::LoadState(int64_t chatId) const {
@@ -881,6 +1016,11 @@ bool SecretChatManager::SendText(
 	auto state = LoadState(chatId);
 	if (!state.has_value()) {
 		LOG(("1338 SecretChat: send skipped, missing state chat_id=%1")
+			.arg(chatId));
+		return false;
+	}
+	if (!state->pending_random_power.isEmpty() || !state->key_fingerprint) {
+		LOG(("1338 SecretChat: send skipped, secret chat not ready chat_id=%1")
 			.arg(chatId));
 		return false;
 	}
@@ -958,6 +1098,115 @@ bool SecretChatManager::SendText(
 			.arg(error.type()));
 	}).send();
 
+	return true;
+}
+
+bool SecretChatManager::StartChat(
+		not_null<UserData*> user,
+		Fn<void(int64_t)> onReady) {
+	if (user->isSelf() || user->isBot() || user->isServiceUser()) {
+		LOG(("1337 SecretChat: start skipped for unsupported userId=%1")
+			.arg(user->id.value));
+		return false;
+	}
+	if (const auto existing = ChatIdForUser(peerToUser(user->id))) {
+		if (onReady) {
+			onReady(*existing);
+		}
+		return true;
+	}
+	const auto inputUser = user->inputUser();
+	const auto randomId = base::RandomValue<int32>();
+	_session->api().request(MTPmessages_GetDhConfig(
+		MTP_int(0),
+		MTP_int(MTP::ModExpFirst::kRandomPowerSize)
+	)).done([=](const MTPmessages_DhConfig &result) {
+		result.match([&](const MTPDmessages_dhConfig &data) {
+			auto primeBytes = bytes::make_vector(data.vp().v);
+			if (!MTP::IsPrimeAndGood(primeBytes, data.vg().v)) {
+				LOG(("1337 SecretChat: bad p/g while requesting outgoing secret chat userId=%1")
+					.arg(user->id.value));
+				return;
+			}
+			const auto modexp = MTP::CreateModExp(
+				data.vg().v,
+				primeBytes,
+				bytes::make_span(data.vrandom().v));
+			if (modexp.modexp.empty()) {
+				LOG(("1337 SecretChat: CreateModExp failed while requesting outgoing secret chat userId=%1")
+					.arg(user->id.value));
+				return;
+			}
+			const auto randomPower = QByteArray(
+				reinterpret_cast<const char*>(modexp.randomPower.data()),
+				int(modexp.randomPower.size()));
+			_session->api().request(MTPmessages_RequestEncryption(
+				inputUser,
+				MTP_int(randomId),
+				MTP_bytes(modexp.modexp)
+			)).done([=](const MTPEncryptedChat &chat) {
+				switch (chat.type()) {
+				case mtpc_encryptedChatWaiting: {
+					const auto &waiting = chat.c_encryptedChatWaiting();
+					auto state = SecretChatState();
+					state.chat_id = waiting.vid().v;
+					state.access_hash = static_cast<uint64>(waiting.vaccess_hash().v);
+					state.admin_id = static_cast<uint64>(waiting.vadmin_id().v);
+					state.participant_id = static_cast<uint64>(waiting.vparticipant_id().v);
+					state.is_creator = true;
+					state.layer = kSecretLayer;
+					state.pending_random_power = randomPower;
+					if (SaveState(state) && onReady) {
+						onReady(waiting.vid().v);
+					}
+					LOG(("1337 SecretChat: requestEncryption done -> encryptedChatWaiting id=%1 userId=%2")
+						.arg(waiting.vid().v)
+						.arg(user->id.value));
+				} break;
+				case mtpc_encryptedChat: {
+					const auto &established = chat.c_encryptedChat();
+					auto state = SecretChatState();
+					state.chat_id = established.vid().v;
+					state.access_hash = static_cast<uint64>(established.vaccess_hash().v);
+					state.admin_id = static_cast<uint64>(established.vadmin_id().v);
+					state.participant_id = static_cast<uint64>(established.vparticipant_id().v);
+					state.is_creator = true;
+					state.layer = kSecretLayer;
+					state.pending_random_power = randomPower;
+					if (!SaveState(state)) {
+						LOG(("1337 SecretChat: failed to save direct encryptedChat creator state id=%1")
+							.arg(established.vid().v));
+						return;
+					}
+					HandleEncryptedChatEstablished(chat);
+					if (onReady) {
+						onReady(established.vid().v);
+					}
+				} break;
+				case mtpc_encryptedChatDiscarded: {
+					LOG(("1337 SecretChat: requestEncryption done -> encryptedChatDiscarded userId=%1")
+						.arg(user->id.value));
+				} break;
+				default:
+					LOG(("1337 SecretChat: requestEncryption done -> unexpected result.type=%1")
+						.arg(int(chat.type())));
+				break;
+				}
+			}).fail([=](const MTP::Error &error) {
+				LOG(("1337 SecretChat: requestEncryption failed userId=%1 error=%2")
+					.arg(user->id.value)
+					.arg(error.type()));
+			}).send();
+		}, [&](const MTPDmessages_dhConfigNotModified &data) {
+			LOG(("1337 SecretChat: getDhConfig not modified while requesting outgoing secret chat userId=%1 random_size=%2")
+				.arg(user->id.value)
+				.arg(data.vrandom().v.size()));
+		});
+	}).fail([=](const MTP::Error &error) {
+		LOG(("1337 SecretChat: getDhConfig failed while requesting outgoing secret chat userId=%1 error=%2")
+			.arg(user->id.value)
+			.arg(error.type()));
+	}).send();
 	return true;
 }
 
@@ -1049,6 +1298,9 @@ QString SecretChatManager::DisplayNameForChat(int64_t chatId) const {
 }
 
 QString SecretChatManager::DisplayStatusForChat(int64_t chatId) const {
+	if (!IsChatReady(chatId)) {
+		return WaitingStatusForChat(chatId);
+	}
 	if (const auto i = _typingUntil.find(chatId); (i != end(_typingUntil)) && (i->second > crl::now())) {
 		return tr::lng_typing(tr::now);
 	}
@@ -1061,6 +1313,89 @@ QString SecretChatManager::DisplayStatusForChat(int64_t chatId) const {
 	}
 	return QString("Secret chat");
 }
+
+QString SecretChatManager::WaitingStatusForChat(int64_t chatId) const {
+	if (const auto user = DisplayUserForChat(chatId)) {
+		return QString("Waiting for %1 to come online.").arg(user->name());
+	}
+	return QString("Waiting for the other device to come online.");
+}
+
+bool SecretChatManager::IsChatReady(int64_t chatId) const {
+	const auto state = LoadState(chatId);
+	return state.has_value()
+		&& state->pending_random_power.isEmpty()
+		&& (state->key_fingerprint != 0);
+}
+
+void SecretChatManager::UpdateTyping(int64_t chatId) {
+	const auto state = LoadState(chatId);
+	if (!state.has_value()) {
+		return;
+	}
+	auto &timer = _outgoingTypingTimers[chatId];
+	if (!timer) {
+		timer = std::make_unique<base::Timer>();
+		timer->setCallback([=, this] {
+			CancelTyping(chatId);
+		});
+	}
+	timer->callOnce(kSecretTypingCancelTimeout);
+	_outgoingTypingActive[chatId] = true;
+
+	const auto now = crl::now();
+	if (const auto i = _outgoingTypingUpdated.find(chatId);
+			(i != end(_outgoingTypingUpdated)) && (i->second > now)) {
+		return;
+	}
+	_outgoingTypingUpdated[chatId] = now + kSecretSendMyTypingInterval;
+	LOG(("1336 SecretChat: sending setEncryptedTyping chat_id=%1 typing=1")
+		.arg(chatId));
+	_session->api().request(MTPmessages_SetEncryptedTyping(
+		MTP_inputEncryptedChat(
+			MTP_int(chatId),
+			MTP_long(state->access_hash)),
+		MTP_bool(true)
+	)).done([=](const MTPBool &) {
+		LOG(("1336 SecretChat: setEncryptedTyping done chat_id=%1 typing=1")
+			.arg(chatId));
+	}).fail([=](const MTP::Error &error) {
+		LOG(("1336 SecretChat: setEncryptedTyping failed chat_id=%1 typing=1 error=%2")
+			.arg(chatId)
+			.arg(error.type()));
+	}).send();
+}
+
+void SecretChatManager::CancelTyping(int64_t chatId) {
+	if (const auto i = _outgoingTypingTimers.find(chatId); i != end(_outgoingTypingTimers)) {
+		i->second->cancel();
+	}
+	const auto active = _outgoingTypingActive.find(chatId);
+	if ((active == end(_outgoingTypingActive)) || !active->second) {
+		return;
+	}
+	active->second = false;
+	const auto state = LoadState(chatId);
+	if (!state.has_value()) {
+		return;
+	}
+	LOG(("1336 SecretChat: sending setEncryptedTyping chat_id=%1 typing=0")
+		.arg(chatId));
+	_session->api().request(MTPmessages_SetEncryptedTyping(
+		MTP_inputEncryptedChat(
+			MTP_int(chatId),
+			MTP_long(state->access_hash)),
+		MTP_bool(false)
+	)).done([=](const MTPBool &) {
+		LOG(("1336 SecretChat: setEncryptedTyping done chat_id=%1 typing=0")
+			.arg(chatId));
+	}).fail([=](const MTP::Error &error) {
+		LOG(("1336 SecretChat: setEncryptedTyping failed chat_id=%1 typing=0 error=%2")
+			.arg(chatId)
+			.arg(error.type()));
+	}).send();
+}
+
 void SecretChatManager::HandleEncryptedTyping(int64_t chatId) {
 	auto &timer = _typingTimers[chatId];
 	if (!timer) {

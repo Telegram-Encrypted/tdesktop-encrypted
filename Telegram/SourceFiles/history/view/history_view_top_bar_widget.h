@@ -10,6 +10,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/rp_widget.h"
 #include "ui/unread_badge.h"
 #include "ui/effects/animations.h"
+#include "ui/effects/send_action_animations.h"
 #include "base/timer.h"
 #include "base/object_ptr.h"
 #include "data/data_report.h"
@@ -248,6 +249,7 @@ private:
 
 	Ui::Text::String _titlePeerText;
 	bool _titlePeerTextOnline = false;
+	Ui::SendActionAnimation _secretTypingAnimation;
 	int _leftTaken = 0;
 	int _rightTaken = 0;
 	bool _animatingMode = false;

@@ -2093,9 +2093,15 @@ void Updates::feedUpdate(const MTPUpdate &update) {
 				c.vdate().v);
 		} break;
 
+		case mtpc_encryptedChatWaiting: {
+			secretManager.HandleEncryptedChatWaiting(chat);
+		} break;
+
+		case mtpc_encryptedChat: {
+			secretManager.HandleEncryptedChatEstablished(chat);
+		} break;
+
 		case mtpc_encryptedChatDiscarded:
-		case mtpc_encryptedChatWaiting:
-		case mtpc_encryptedChat:
 		case mtpc_encryptedChatEmpty: {
 			secretManager.LogEncryptionChat(chat, "updateEncryption");
 		} break;

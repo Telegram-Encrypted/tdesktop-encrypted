@@ -943,6 +943,19 @@ HistoryWidget::HistoryWidget(
 		}
 	}, lifetime());
 
+	Data::SecretChats::Manager(&session()).presentationUpdates(
+	) | rpl::on_next([=](int64_t chatId) {
+		if (shownSecretChatId() != std::optional<int64_t>(chatId)) {
+			return;
+		}
+		const auto changed = updateCanSendMessage();
+		updateSendRestriction();
+		updateControlsVisibility();
+		if (changed) {
+			updateControlsGeometry();
+		}
+	}, lifetime());
+
 	using Type = Data::DefaultNotify;
 	rpl::merge(
 		session().data().notifySettings().defaultUpdates(Type::User),
@@ -1910,14 +1923,17 @@ void HistoryWidget::fieldChanged() {
 	InvokeQueued(this, [=] {
 		updateInlineBotQuery();
 		if (_history
-			&& !shownSecretChatId()
 			&& !_inlineBot
 			&& !_editMsgId
 			&& (!_autocomplete || !_autocomplete->stickersEmoji())
 			&& updateTyping) {
-			session().sendProgressManager().update(
-				_history,
-				Api::SendProgressType::Typing);
+			if (const auto chatId = shownSecretChatId()) {
+				Data::SecretChats::Manager(&session()).UpdateTyping(*chatId);
+			} else {
+				session().sendProgressManager().update(
+					_history,
+					Api::SendProgressType::Typing);
+			}
 		}
 	});
 
@@ -2578,10 +2594,14 @@ void HistoryWidget::showHistory(
 			session().data().hideShownSpoilers();
 			_composeSearch = nullptr;
 		}
-		session().sendProgressManager().update(
-			_history,
-			Api::SendProgressType::Typing,
-			-1);
+		if (const auto chatId = shownSecretChatId()) {
+			Data::SecretChats::Manager(&session()).CancelTyping(*chatId);
+		} else {
+			session().sendProgressManager().update(
+				_history,
+				Api::SendProgressType::Typing,
+				-1);
+		}
 		session().data().histories().sendPendingReadInbox(_history);
 		session().sendProgressManager().cancelTyping(_history);
 	}
@@ -4910,6 +4930,12 @@ bool HistoryWidget::sendSecretText(Api::SendOptions options) {
 	if (!chatId) {
 		return false;
 	}
+	if (const auto state = Data::SecretChats::Manager(&session()).LoadState(*chatId);
+		!state.has_value()
+			|| !state->pending_random_power.isEmpty()
+			|| !state->key_fingerprint) {
+		return true;
+	}
 	if (_editMsgId
 		|| readyToForward()
 		|| _kbReplyTo
@@ -4936,6 +4962,7 @@ bool HistoryWidget::sendSecretText(Api::SendOptions options) {
 			replyTo())) {
 		return true;
 	}
+	Data::SecretChats::Manager(&session()).CancelTyping(*chatId);
 
 	clearFieldText();
 	cancelReply(false);
@@ -7062,6 +7089,17 @@ int HistoryWidget::countAutomaticScrollTop() {
 }
 
 Data::SendError HistoryWidget::computeSendRestriction() const {
+	if (const auto chatId = shownSecretChatId()) {
+		const auto &manager = Data::SecretChats::Manager(&session());
+		if (!manager.IsChatReady(*chatId)) {
+			LOG(("1337 SecretChat: history widget waiting send restriction active chat_id=%1")
+				.arg(*chatId));
+			return Data::SendError({
+				.text = manager.WaitingStatusForChat(*chatId),
+			});
+		}
+		return Data::SendError();
+	}
 	if (!_canSendMessages
 		&& _peer->amMonoforumAdmin()
 		&& !_peer->asChannel()->monoforumDisabled()) {
@@ -9320,10 +9358,13 @@ void HistoryWidget::handlePeerUpdate() {
 }
 
 bool HistoryWidget::updateCanSendMessage() {
-	if (shownSecretChatId()) {
-		const auto changed = !_canSendMessages || !_canSendTexts;
-		_canSendMessages = true;
-		_canSendTexts = true;
+	if (const auto chatId = shownSecretChatId()) {
+		const auto ready = Data::SecretChats::Manager(&session()).IsChatReady(
+			*chatId);
+		const auto changed = (_canSendMessages != ready)
+			|| (_canSendTexts != ready);
+		_canSendMessages = ready;
+		_canSendTexts = ready;
 		return changed;
 	}
 	if (!_peer) {

@@ -42,6 +42,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_saved_sublist.h"
 #include "data/data_session.h"
 #include "data/data_user.h"
+#include "data/secret/secret_chat_manager.h"
 #include "data/notify/data_notify_settings.h"
 #include "data/stickers/data_custom_emoji.h"
 #include "dialogs/ui/dialogs_layout.h"
@@ -2708,18 +2709,28 @@ void ActionsFiller::addBlockAction(not_null<UserData*> user) {
 }
 
 void ActionsFiller::addSecretChatAction(not_null<UserData*> user) {
-	// Start Secret Chat Button
 	auto text = rpl::single(QString("Start Secret Chat"));
 	const auto controller = _controller->parentController();
 
 	auto callback = [=] {
+		const auto showSecretChat = [=](int64_t chatId) {
+			controller->showThread(
+				Data::SecretChats::Manager(&user->session()).ViewHistoryForChat(chatId),
+				ShowAtUnreadMsgId,
+				Window::SectionShow(Window::SectionShow::Way::ClearStack));
+		};
 		controller->show(Ui::MakeConfirmBox({
 			.text = QString("Are you sure you want to start a secret chat?"),
 			.confirmed = [=](Fn<void()>&& close) {
-				close(); 
-				LOG(("1337 SecretChat: UI requested start for userId=%1.").arg(user->id.value));
-				//controller->showToast("A private chat request has been sent");
-
+				close();
+				auto &manager = Data::SecretChats::Manager(&user->session());
+				if (const auto existing = manager.ChatIdForUser(peerToUser(user->id))) {
+					showSecretChat(*existing);
+					return;
+				}
+				if (!manager.StartChat(user, showSecretChat)) {
+					controller->showToast("Unable to start secret chat.");
+				}
 			},
 			.confirmText = QString("Start"),
 			.cancelText = QString("Cancel")
@@ -2793,7 +2804,9 @@ void ActionsFiller::fillUserActions(not_null<UserData*> user) {
 			addReportAction();
 		}
 		addBlockAction(user);
-		addSecretChatAction(user);
+		if (!user->isBot()) {
+			addSecretChatAction(user);
+		}
 	}
 }
 

@@ -374,6 +374,7 @@ void PaintRow(
 	const auto history = entry->asHistory();
 	const auto thread = entry->asThread();
 	const auto sublist = entry->asSublist();
+	const auto secret = entry->asSecretChat();
 
 	auto bg = context.active
 		? st::dialogsBgActive
@@ -694,7 +695,51 @@ void PaintRow(
 				context.width,
 				color,
 				context.now)) {
-			// Empty history
+			if (secret) {
+				const auto &manager = Data::SecretChats::Manager(&entry->session());
+				if (!manager.IsChatReady(secret->chatId())) {
+					const auto user = manager.DisplayUserForChat(secret->chatId());
+					const auto prefix = u"Waiting for "_q;
+					const auto name = user
+						? user->name()
+						: QString("the other device");
+					const auto suffix = user
+						? u" to come online."_q
+						: QString();
+					auto left = nameleft;
+					auto remaining = availableWidth;
+					p.setPen(st::contactsStatusFgOnline);
+					if (!prefix.isEmpty() && (remaining > 0)) {
+						p.setFont(st::dialogsTextFont);
+						const auto text = st::dialogsTextFont->elided(prefix, remaining);
+						const auto width = st::dialogsTextFont->width(text);
+						p.drawText(
+							QRect(left, texttop, remaining, st::dialogsTextFont->height),
+							Qt::AlignLeft | Qt::AlignVCenter,
+							text);
+						left += width;
+						remaining -= width;
+					}
+					if (!name.isEmpty() && (remaining > 0)) {
+						p.setFont(st::semiboldFont);
+						const auto text = st::semiboldFont->elided(name, remaining);
+						const auto width = st::semiboldFont->width(text);
+						p.drawText(
+							QRect(left, texttop, remaining, st::semiboldFont->height),
+							Qt::AlignLeft | Qt::AlignVCenter,
+							text);
+						left += width;
+						remaining -= width;
+					}
+					if (!suffix.isEmpty() && (remaining > 0)) {
+						p.setFont(st::dialogsTextFont);
+						p.drawText(
+							QRect(left, texttop, remaining, st::dialogsTextFont->height),
+							Qt::AlignLeft | Qt::AlignVCenter,
+							st::dialogsTextFont->elided(suffix, remaining));
+					}
+				}
+			}
 		}
 	} else if (!item->isEmpty()) {
 		if ((thread || sublist) && !promoted) {

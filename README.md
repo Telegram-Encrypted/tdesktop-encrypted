@@ -14,15 +14,25 @@ The source code is published under GPLv3 with OpenSSL exception, the license is 
 
 ## Progress
 
- - [x] Accept incoming secret chats, key exchange 
- - [x] Decrypt incoming messages, encrypt outgoing messages
- - [x] A simple UI that can handle sending & receiving text messages
- - [x] Proper & Secure storage of chats and messages
- - [x] Support text formatting, replies, contact mapping/ui.
- - [ ] Support stickers, documents, pictures.
- - [ ] Support services: read receipts, typing, message deletion
- - [ ] Handle key rotation properly
- - [ ] Create encrypted group chats that works the same way SimpleX works.
+ - [x] Accept incoming secret chats, key exchange.
+ - [x] Decrypt incoming messages, encrypt outgoing messages.
+ - [x] A simple UI that can handle sending & receiving text messages.
+ - [x] Proper & Secure storage of chats and messages.
+ - [x] Support text formatting, replies, contact mapping.
+ - [x] Support read receipts, typing events.
+ - [x] Initiate secret chat from client.
+ - [ ] Support stickers, documents, media.
+ - [ ] Support forwarding a message into secret chat.
+ - [ ] Handle delete message & chat events.
+ - [ ] Handle key rotation.
+ - [ ] Handle notifications.
+ - [ ] Handle periodic chat clear. 
+
+#### Future wishes
+ - [ ] Create encrypted group chats that works the same way with SimpleX group chat logic, by rendering seperate 
+ - [ ] Bring encryption to standard chats to make use of telegram cloud, but don't know if this is possible without violating telegram's client api user agreement.
+
+
 
   
 

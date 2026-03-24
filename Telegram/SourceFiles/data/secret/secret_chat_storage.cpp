@@ -14,7 +14,7 @@ namespace {
 
 constexpr auto kSecretStorageBlobKey = "secret-chat-storage-v1";
 constexpr auto kSecretStorageMagic = quint32(0x53434331);
-constexpr auto kSecretStorageVersion = quint32(2);
+constexpr auto kSecretStorageVersion = quint32(3);
 
 enum class MessageKind : quint32 {
 	Text = 1,
@@ -220,7 +220,8 @@ QByteArray SerializeStore(const SecretStore &store) {
 			<< qint32(state.incoming_sequence)
 			<< qint32(state.outgoing_sequence)
 			<< quint64(state.key_fingerprint)
-			<< authKey;
+			<< authKey
+			<< state.pending_random_power;
 	}
 	stream << quint32(store.messages.size());
 	for (auto i = store.messages.cbegin(); i != store.messages.cend(); ++i) {
@@ -244,7 +245,7 @@ std::optional<SecretStore> DeserializeStore(const QByteArray &bytes) {
 	stream >> magic >> version;
 	if (stream.status() != QDataStream::Ok
 		|| magic != kSecretStorageMagic
-		|| (version != 1 && version != kSecretStorageVersion)) {
+		|| (version != 1 && version != 2 && version != kSecretStorageVersion)) {
 		return std::nullopt;
 	}
 
@@ -263,6 +264,7 @@ std::optional<SecretStore> DeserializeStore(const QByteArray &bytes) {
 		auto outgoingSequence = qint32();
 		auto keyFingerprint = quint64();
 		auto authKey = QByteArray();
+		auto pendingRandomPower = QByteArray();
 		stream
 			>> key
 			>> chatId
@@ -275,6 +277,9 @@ std::optional<SecretStore> DeserializeStore(const QByteArray &bytes) {
 			>> outgoingSequence
 			>> keyFingerprint
 			>> authKey;
+		if (version >= 3) {
+			stream >> pendingRandomPower;
+		}
 		if (stream.status() != QDataStream::Ok
 			|| authKey.size() != int(MTP::AuthKey::kSize)) {
 			return std::nullopt;
@@ -289,6 +294,7 @@ std::optional<SecretStore> DeserializeStore(const QByteArray &bytes) {
 			.incoming_sequence = incomingSequence,
 			.outgoing_sequence = outgoingSequence,
 			.key_fingerprint = keyFingerprint,
+			.pending_random_power = std::move(pendingRandomPower),
 		};
 		std::memcpy(state.auth_key.data(), authKey.constData(), size_t(authKey.size()));
 		result.states.insert(key, state);

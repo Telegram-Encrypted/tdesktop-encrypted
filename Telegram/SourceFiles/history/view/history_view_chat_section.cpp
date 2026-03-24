@@ -299,7 +299,17 @@ ChatWidget::ChatWidget(
 	setupShortcuts();
 	setupTranslateBar();
 
-	_peer->updateFull();
+	if (const auto chatId = Data::SecretChats::Manager(&session())
+			.ChatIdForHistory(_history);
+		!chatId) {
+		_peer->updateFull();
+	} else if (const auto state = Data::SecretChats::Manager(&session())
+			.LoadState(*chatId);
+		state.has_value()
+			&& state->pending_random_power.isEmpty()
+			&& state->key_fingerprint) {
+		_peer->updateFull();
+	}
 
 	refreshTopBarActiveChat();
 
@@ -739,7 +749,7 @@ bool ChatWidget::computeAreComments() const {
 }
 
 void ChatWidget::setupComposeControls() {
-	auto topicWriteRestrictions = rpl::single(
+	rpl::producer<Data::SendError> topicWriteRestrictions = rpl::single(
 	) | rpl::then(session().changes().topicUpdates(
 		Data::TopicUpdate::Flag::Closed
 	) | rpl::filter([=](const Data::TopicUpdate &update) {
@@ -752,7 +762,7 @@ void ChatWidget::setupComposeControls() {
 		return (!topic || topic->canToggleClosed() || !topic->closed())
 			? Data::SendError()
 			: tr::lng_forum_topic_closed(tr::now);
-	});
+	}) | rpl::type_erased;
 	auto writeRestriction = rpl::combine(
 		session().frozenValue(),
 		session().changes().peerFlagsValue(
@@ -794,7 +804,7 @@ void ChatWidget::setupComposeControls() {
 			.type = Controls::WriteRestrictionType::Rights,
 			.boostsToLift = text.boostsToLift,
 		} : Controls::WriteRestriction();
-	});
+	}) | rpl::type_erased;
 
 	_composeControls->setHistory({
 		.history = _history.get(),
@@ -1427,6 +1437,16 @@ void ChatWidget::sendVoice(const ComposeControls::VoiceToSend &data) {
 }
 
 void ChatWidget::send(Api::SendOptions options) {
+	if (const auto chatId = Data::SecretChats::Manager(&session())
+			.ChatIdForHistory(_history)) {
+		const auto &manager = Data::SecretChats::Manager(&session());
+		if (const auto state = manager.LoadState(*chatId);
+			!state.has_value()
+				|| !state->pending_random_power.isEmpty()
+				|| !state->key_fingerprint) {
+			return;
+		}
+	}
 	if (!options.scheduled && showSlowmodeError()) {
 		return;
 	}
